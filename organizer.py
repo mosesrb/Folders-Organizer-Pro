@@ -1,4 +1,6 @@
 import os
+VERSION = "4.0.0"
+
 import shutil
 import zipfile
 import webview

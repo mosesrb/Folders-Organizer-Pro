@@ -1,4 +1,4 @@
-# 📂 Folders Organizer Pro (v4)
+# 📂 Folders Organizer Pro (v4.0.0)
 > **A targeted solution for Windows digital workspace entropy.**
 
 Born from the frustrations of managing massive, cluttered Windows directories, **Folders Organizer Pro** is a high-performance utility designed to turn chaos into structure in seconds.
