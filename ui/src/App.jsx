@@ -79,7 +79,10 @@ const App = () => {
   const loadRules = async () => {
     if (!path || !window.pywebview?.api) return;
     const res = await window.pywebview.api.load_rules(path);
-    if (res.success && res.rules?.length > 0) setCustomRules(res.rules);
+    if (res.success) {
+      if (res.rules?.length > 0) setCustomRules(res.rules);
+      setHasHistory(res.has_history);
+    }
   };
 
   const handleRefreshStats = async () => {
