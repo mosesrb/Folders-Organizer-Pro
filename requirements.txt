@@ -1,0 +1,4 @@
+pywebview
+pathlib
+typing
+send2trash
