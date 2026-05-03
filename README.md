@@ -1,4 +1,4 @@
-# 📁 Folders Organizer Pro v5.0.3
+# 📁 Folders Organizer Pro v5.0.4
 
 ![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)
 
@@ -74,7 +74,7 @@ graph TD;
 Bulk file operations require absolute confidence.
 - **Critical Shield (HARDENED)**: Comprehensive immunity for Windows system folders (`System32`, `Program Files`, etc.). Applied across the entire API surface to prevent any operation in sensitive areas.
 - **Simulation Mode (Dry-Run)**: Every automation supports a safe simulation. Visualize changes in the dashboard before a single file is moved.
-- **Live Console Engine**: A persistent log stream that tracks heavy operations in real-time, providing total transparency.
+- **Live Console Engine**: A persistent log stream that tracks heavy operations in real-time, providing total transparency. **If an extraction fails (e.g., .7z or .rar), check the Live Console for detailed diagnostic logs.**
 - **Atomic Undo**: Every session generates an encrypted `.organizer_history.json`. Revert any move, rename, or categorization with one click.
 - **Recycle Bin Path**: Deleted duplicates are moved to the system Recycle Bin, not permanently erased.
 
@@ -93,7 +93,7 @@ Bulk file operations require absolute confidence.
     - **Sequential & Regex Renaming**: Professional-grade bulk renaming.
     - **Media Processing Hub**: Recursive conversion (MP3 to WAV), PDF compression, and image optimization.
     - **Open in Explorer**: Direct integration for instant folder navigation from the dashboard.
-    - **Archive Extraction**: Automated unpacking with source cleanup.
+    - **Archive Extraction (v5.0.4)**: Automated unpacking with support for **ZIP, TAR, 7Z, and RAR**. Native `py7zr` support and intelligent fallback for RAR (WinRAR/7-Zip detection).
     - **Large File Archiver**: Intelligent compression for files over defined size thresholds.
     - **Additive Backups**: Smart sync engine that only copies new or modified files.
     - **Empty Folder Pruning**: Recursive cleanup of directory structures.
@@ -107,3 +107,4 @@ Bulk file operations require absolute confidence.
 ---
 
 *Because a clean directory is a clean mind.*
+

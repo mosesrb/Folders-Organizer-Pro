@@ -39,3 +39,19 @@ test_api.py
 test_security.py
 current_status.md
 CURRENT_STATUS.md
+
+# Test Artifacts and Temporary Dirs
+bad.zip
+dummy.txt
+ext_test_dir/
+test_7z.7z
+test_7z_out/
+test_extract_ws/
+test_fail.zip
+test_shutil/
+test_shutil.zip
+test_shutil_2/
+test_shutil_2.zip
+test_shutil_2_out/
+test_shutil_out/
+test_unzip_workspace/

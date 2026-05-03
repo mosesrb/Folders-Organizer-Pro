@@ -181,7 +181,7 @@ const App = () => {
   const handleSelectFolder = async () => {
     try {
       if (window.pywebview && window.pywebview.api) {
-        const result = await window.pywebview.api.select_folder();
+        const result = await window.pywebview.api.select_folder('workspace');
         if (result) {
           if (result.system_warning) {
             setPendingSystemPath(result.path);
@@ -210,7 +210,7 @@ const App = () => {
   const handleSelectBackupDest = async () => {
     try {
       if (window.pywebview?.api) {
-        const result = await window.pywebview.api.select_folder();
+        const result = await window.pywebview.api.select_folder('backup');
         if (result && !result.system_warning) setBackupDest(result.path);
         else if (result?.system_warning) showStatus('error', 'Cannot use system-critical folder as backup destination.');
       }
@@ -352,6 +352,9 @@ const App = () => {
 
         if (result.success) {
           showStatus(isDryRun ? 'info' : 'success', result.message);
+          if (result.errors && result.errors.length > 0) {
+            result.errors.forEach(err => addLog(err, 'error'));
+          }
           if (UNDOABLE_OPS.includes(opName) && !isDryRun) setHasHistory(true);
           if (opName === 'undo_last_operation') setHasHistory(false);
           if (opName === 'find_duplicates') setDuplicates(result.duplicates || []);

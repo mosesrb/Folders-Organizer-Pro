@@ -2,3 +2,5 @@ pywebview
 pathlib
 typing
 send2trash
+py7zr
+rarfile

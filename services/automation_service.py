@@ -9,6 +9,15 @@ import re
 import shutil
 import datetime
 import zipfile
+try:
+    import py7zr
+except ImportError:
+    py7zr = None
+try:
+    import rarfile
+except ImportError:
+    rarfile = None
+
 from pathlib import Path
 
 # Protected system extensions/names — never touch these during cleanup
@@ -168,33 +177,82 @@ def batch_unzip(path: str, dry_run: bool, progress_callback) -> tuple:
     archives = [f for f in p.iterdir() if f.is_file() and f.name != '.organizer_history.json' and f.suffix.lower() in archive_exts]
 
     if not archives:
-        return [], 0
+        return [], 0, []
 
-    total = len(archives)
     history = []
-    results = []
+    errors = []
     for idx, zf in enumerate(archives):
-        out_dir = p / zf.stem
+        # Use collision-safe destination
+        out_dir = _safe_dest(p, zf.stem)
+        
         if not dry_run:
             try:
-                if not out_dir.exists():
-                    out_dir.mkdir()
+                # Special handling for different formats
+                suffix = zf.suffix.lower()
                 
-                # shutil handles multiple formats automatically
-                shutil.unpack_archive(str(zf), str(out_dir))
+                if suffix == '.7z':
+                    if py7zr:
+                        with py7zr.SevenZipFile(str(zf), mode='r') as archive:
+                            archive.extractall(path=str(out_dir))
+                    else:
+                        raise ImportError("py7zr library is missing. Cannot extract .7z files.")
                 
-                results.append(str(zf))
-                history.append({"action": "create", "src": None, "dst": str(out_dir)})
-            except shutil.ReadError:
-                # Common for .rar files if 'rarfile' and 'unrar' aren't available natively
-                results.append(f"ERROR: {zf.name} — Format not natively supported. Try installing 'rarfile'.")
+                elif suffix == '.rar':
+                    if rarfile:
+                        # Attempt to find unrar/7z if not already configured
+                        try:
+                            with rarfile.RarFile(str(zf)) as archive:
+                                archive.extractall(path=str(out_dir))
+                        except rarfile.RarCannotExec:
+                            # Try to find common installation paths for unrar.exe or 7z.exe
+                            common_paths = [
+                                r"C:\Program Files\WinRAR\UnRAR.exe",
+                                r"C:\Program Files\7-Zip\7z.exe",
+                                r"C:\Program Files (x86)\WinRAR\UnRAR.exe",
+                                r"C:\Program Files (x86)\7-Zip\7z.exe"
+                            ]
+                            found = False
+                            for tool in common_paths:
+                                if os.path.exists(tool):
+                                    rarfile.TOOL_PATH = tool
+                                    found = True
+                                    break
+                            
+                            if found:
+                                with rarfile.RarFile(str(zf)) as archive:
+                                    archive.extractall(path=str(out_dir))
+                            else:
+                                raise RuntimeError("RAR extraction requires WinRAR or 7-Zip installed in standard locations, or UnRAR.exe in PATH.")
+                    else:
+                        raise ImportError("rarfile library is missing. Cannot extract .rar files.")
+                
+                else:
+                    # shutil handles multiple formats automatically (zip, tar, etc.)
+                    shutil.unpack_archive(str(zf), str(out_dir))
+                
+                # Double check if anything was extracted
+                if out_dir.exists() and not any(out_dir.iterdir()):
+                    raise RuntimeError("Archive appeared to extract successfully but resulted in an empty folder.")
+                
+                history.append({"action": "create", "src": str(zf), "dst": str(out_dir)})
             except Exception as e:
-                results.append(f"ERROR: {zf.name} — {e}")
+                # Cleanup if folder was partially created or left empty
+                if out_dir.exists():
+                    try:
+                        shutil.rmtree(out_dir)
+                    except:
+                        pass
+                
+                err_msg = str(e)
+                if isinstance(e, shutil.ReadError):
+                    err_msg = f"Format {zf.suffix} not supported by standard library. Please ensure additional tools are installed."
+                errors.append(f"{zf.name}: {err_msg}")
         else:
-            results.append(str(zf))
-        progress_callback(int(((idx + 1) / total) * 100))
+            history.append({"action": "create", "src": str(zf), "dst": str(out_dir)})
+        
+        progress_callback(int(((idx + 1) / len(archives)) * 100))
 
-    return history, total
+    return history, len(history), errors
 
 
 

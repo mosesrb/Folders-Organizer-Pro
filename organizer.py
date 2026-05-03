@@ -29,7 +29,7 @@ def is_system_critical_dir(path: str) -> bool:
     return False
 
 import subprocess
-VERSION = "5.0.3"
+VERSION = "5.0.4"
 
 class OrganizerAPI:
     def __init__(self):
@@ -69,13 +69,16 @@ class OrganizerAPI:
         except:
             pass
 
-    def select_folder(self):
+    def select_folder(self, purpose="workspace"):
         result = self._window.create_file_dialog(webview.FOLDER_DIALOG)
         if result:
-            self._current_workspace = result[0]
-            self._load_history(self._current_workspace)
-            system_warning = is_system_critical_dir(result[0])
-            return {"path": result[0], "system_warning": system_warning}
+            path = result[0]
+            if purpose == "workspace":
+                self._current_workspace = path
+                self._load_history(self._current_workspace)
+            
+            system_warning = is_system_critical_dir(path)
+            return {"path": path, "system_warning": system_warning}
         return None
 
     def select_file(self, file_types: str = "All files (*.*)"):
@@ -396,12 +399,24 @@ class OrganizerAPI:
         try:
             if is_system_critical_dir(path):
                 return {"success": False, "error": "System-critical directory. Operation blocked."}
-            history, count = automation_service.batch_unzip(path, dry_run, self._update_progress)
+            history, count, errors = automation_service.batch_unzip(path, dry_run, self._update_progress)
             if not dry_run:
                 self._history = history
                 self._save_history()
-            msg = f"Simulation: {count} archives would be extracted." if dry_run else f"Extracted {count} archives."
-            return {"success": True, "message": msg, "items": [h['dst'] for h in history]}
+            
+            msg = f"Extracted {count} archives."
+            if dry_run:
+                msg = f"Simulation: {count} archives would be extracted."
+            
+            if errors:
+                msg += f" ({len(errors)} failures. See logs for details.)"
+                
+            return {
+                "success": True, 
+                "message": msg, 
+                "items": [h['dst'] for h in history],
+                "errors": errors
+            }
         except Exception as e:
             return {"success": False, "error": str(e)}
 
