@@ -3,6 +3,8 @@ import shutil
 import webview
 import json
 import datetime
+import threading
+from functools import wraps
 from pathlib import Path
 from typing import List, Dict
 
@@ -18,7 +20,10 @@ _SYSTEM_CRITICAL_DIRS = {
 
 def is_system_critical_dir(path: str) -> bool:
     """Returns True if path matches a known system-critical directory."""
-    p = Path(path)
+    try:
+        p = Path(path).resolve(strict=False)
+    except Exception:
+        p = Path(path)
     # Check all parts of the path
     for part in p.parts:
         if part.lower().rstrip('\\') in _SYSTEM_CRITICAL_DIRS:
@@ -31,11 +36,19 @@ def is_system_critical_dir(path: str) -> bool:
 import subprocess
 VERSION = "5.0.4"
 
+def requires_lock(func):
+    @wraps(func)
+    def wrapper(self, *args, **kwargs):
+        with self._lock:
+            return func(self, *args, **kwargs)
+    return wrapper
+
 class OrganizerAPI:
     def __init__(self):
         self._window = None
         self._history = [] # Stores (old_path, new_path) tuples
         self._current_workspace = None
+        self._lock = threading.Lock()
 
     def set_window(self, window):
         self._window = window
@@ -59,13 +72,15 @@ class OrganizerAPI:
             self._history = []
 
     def _save_history(self):
-        """Saves current undo history to the workspace."""
+        """Saves current undo history to the workspace using atomic writes."""
         if not self._current_workspace:
             return
         try:
             history_path = Path(self._current_workspace) / '.organizer_history.json'
-            with open(history_path, 'w', encoding='utf-8') as f:
+            tmp_path = history_path.with_suffix('.json.tmp')
+            with open(tmp_path, 'w', encoding='utf-8') as f:
                 json.dump(self._history, f, indent=2)
+            os.replace(tmp_path, history_path)
         except:
             pass
 
@@ -104,6 +119,7 @@ class OrganizerAPI:
                     return False
         return False
 
+    @requires_lock
     def undo_last_operation(self, *args, **kwargs):
         """Reverts the changes made in the last operation.
         Accepts extra args to prevent frontend mismatch.
@@ -178,6 +194,7 @@ class OrganizerAPI:
         except Exception as e:
             return {"success": False, "error": f"Critical undo failure: {str(e)}"}
 
+    @requires_lock
     def sequential_rename(self, path: str, prefix: str, mode: str = "files", sort_mode: str = "name", dry_run: bool = False, filter_str: str = "", use_regex: bool = False):
         if is_system_critical_dir(path):
             return {"success": False, "error": f"Operation blocked: '{path}' is a system-critical directory."}
@@ -205,6 +222,7 @@ class OrganizerAPI:
         except Exception as e:
             return {"success": False, "error": str(e)}
 
+    @requires_lock
     def delete_duplicates(self, path: str, groups: list, dry_run: bool = False):
         if is_system_critical_dir(path):
             return {"success": False, "error": f"Operation blocked: '{path}' is a system-critical directory."}
@@ -218,6 +236,7 @@ class OrganizerAPI:
         except Exception as e:
             return {"success": False, "error": str(e)}
 
+    @requires_lock
     def sort_by_date(self, path: str, grain: str = "month", dry_run: bool = False):
         if is_system_critical_dir(path):
             return {"success": False, "error": f"Operation blocked: '{path}' is a system-critical directory."}
@@ -232,6 +251,7 @@ class OrganizerAPI:
         except Exception as e:
             return {"success": False, "error": str(e)}
 
+    @requires_lock
     def zip_folders(self, path: str, dry_run: bool = False):
         if is_system_critical_dir(path):
             return {"success": False, "error": f"Operation blocked: '{path}' is a system-critical directory."}
@@ -250,6 +270,7 @@ class OrganizerAPI:
         except Exception as e:
             return {"success": False, "error": str(e)}
 
+    @requires_lock
     def change_extensions(self, path: str, old_ext: str, new_ext: str, dry_run: bool = False, filter_str: str = ""):
         if is_system_critical_dir(path):
             return {"success": False, "error": f"Operation blocked: '{path}' is a system-critical directory."}
@@ -273,6 +294,7 @@ class OrganizerAPI:
         except Exception as e:
             return {"success": False, "error": str(e)}
 
+    @requires_lock
     def flatten_workspace(self, path: str, dry_run: bool = False):
         if is_system_critical_dir(path):
             return {"success": False, "error": f"Operation blocked: '{path}' is a system-critical directory."}
@@ -318,6 +340,7 @@ class OrganizerAPI:
         except Exception as e:
             return {"success": False, "error": str(e)}
 
+    @requires_lock
     def smart_categorize(self, path: str, dry_run: bool = False, custom_rules: list = None):
         if is_system_critical_dir(path):
             return {"success": False, "error": f"Operation blocked: '{path}' is a system-critical directory."}
@@ -342,6 +365,7 @@ class OrganizerAPI:
         except Exception as e:
             return {"success": False, "error": str(e)}
 
+    @requires_lock
     def save_rules(self, path: str, rules: list):
         try:
             rules_path = Path(path) / '.organizer_rules.json'
@@ -355,6 +379,7 @@ class OrganizerAPI:
     # Advanced Automation Methods
     # ─────────────────────────────────────────────
 
+    @requires_lock
     def delete_empty_folders(self, path: str, dry_run: bool = False):
         """Removes all empty subdirectories recursively."""
         try:
@@ -366,6 +391,7 @@ class OrganizerAPI:
         except Exception as e:
             return {"success": False, "error": str(e)}
 
+    @requires_lock
     def advanced_regex_rename(self, path: str, pattern: str, replacement: str, dry_run: bool = False):
         """Batch rename files using regex find/replace."""
         try:
@@ -380,6 +406,7 @@ class OrganizerAPI:
         except Exception as e:
             return {"success": False, "error": str(e)}
 
+    @requires_lock
     def cleanup_old_files(self, path: str, days: int = 90, dry_run: bool = False):
         """Archives files older than `days` to a .archived_files subfolder."""
         try:
@@ -394,6 +421,7 @@ class OrganizerAPI:
         except Exception as e:
             return {"success": False, "error": str(e)}
 
+    @requires_lock
     def batch_unzip(self, path: str, dry_run: bool = False):
         """Extracts common archives (.zip, .rar, .7z, etc.) into named subfolders."""
         try:
@@ -420,6 +448,7 @@ class OrganizerAPI:
         except Exception as e:
             return {"success": False, "error": str(e)}
 
+    @requires_lock
     def archive_large_files(self, path: str, threshold_mb: float = 500.0, dry_run: bool = False):
         """Moves files over threshold_mb MB into a LargeFiles subfolder."""
         try:
@@ -434,6 +463,7 @@ class OrganizerAPI:
         except Exception as e:
             return {"success": False, "error": str(e)}
 
+    @requires_lock
     def additive_backup(self, src: str, dest: str, dry_run: bool = False):
         """Copies new/updated files from src to dest. Never deletes."""
         try:
@@ -448,6 +478,7 @@ class OrganizerAPI:
         except Exception as e:
             return {"success": False, "error": str(e)}
 
+    @requires_lock
     def convert_image_formats(self, path: str, source_exts: list, target_ext: str, dry_run: bool = False):
         """Batch converts images to target format using Pillow."""
         try:
@@ -533,6 +564,7 @@ class OrganizerAPI:
         except Exception as e:
             return {"success": False, "error": str(e)}
 
+    @requires_lock
     def convert_mp3_to_wav(self, file_path: str, remove_original: bool = False):
         """Converts a specific MP3 file to WAV."""
         try:
@@ -557,6 +589,7 @@ class OrganizerAPI:
         except Exception as e:
             return {"success": False, "error": str(e)}
 
+    @requires_lock
     def batch_convert_mp3_to_wav(self, path: str, remove_original: bool = False, dry_run: bool = False):
         """Converts all MP3 files in a folder to WAV."""
         try:
@@ -591,6 +624,7 @@ class OrganizerAPI:
         except Exception as e:
             return {"success": False, "error": str(e)}
 
+    @requires_lock
     def compress_pdf(self, file_path: str, remove_original: bool = False):
         """Compresses a specific PDF file."""
         try:
@@ -611,6 +645,7 @@ class OrganizerAPI:
         except Exception as e:
             return {"success": False, "error": str(e)}
 
+    @requires_lock
     def batch_compress_pdf(self, path: str, remove_original: bool = False, dry_run: bool = False):
         """Compresses all PDF files in a folder recursively."""
         try:
@@ -645,6 +680,7 @@ class OrganizerAPI:
         except Exception as e:
             return {"success": False, "error": str(e)}
 
+    @requires_lock
     def optimize_image(self, file_path: str, quality: int = 85, remove_original: bool = False):
         """Optimizes a single image."""
         try:
@@ -665,6 +701,7 @@ class OrganizerAPI:
         except Exception as e:
             return {"success": False, "error": str(e)}
 
+    @requires_lock
     def optimize_images(self, path: str, quality: int = 85, remove_original: bool = False, dry_run: bool = False):
         """Optimizes all images in a folder recursively."""
         try:
