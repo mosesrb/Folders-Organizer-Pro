@@ -9,6 +9,7 @@ import re
 import shutil
 import datetime
 import zipfile
+import tarfile
 try:
     import py7zr
 except ImportError:
@@ -19,22 +20,11 @@ except ImportError:
     rarfile = None
 
 from pathlib import Path
+from .file_service import safe_dest as _safe_dest
 
 # Protected system extensions/names — never touch these during cleanup
 _PROTECTED_EXTS = {'.lnk', '.ini', '.sys', '.inf', '.dll', '.icl', '.theme'}
 _PROTECTED_NAMES = {'desktop.ini', 'thumbs.db', '.ds_store'}
-
-
-def _safe_dest(target_dir: Path, filename: str) -> Path:
-    """Collision-safe destination. Appends _1, _2... if file exists."""
-    stem = Path(filename).stem
-    suffix = Path(filename).suffix
-    dest = target_dir / filename
-    counter = 1
-    while dest.exists():
-        dest = target_dir / f"{stem}_{counter}{suffix}"
-        counter += 1
-    return dest
 
 
 # ──────────────────────────────────────────────
@@ -78,15 +68,22 @@ def delete_empty_folders(path: str, dry_run: bool, progress_callback) -> tuple:
 # ──────────────────────────────────────────────
 # 2. Advanced Regex Rename
 # ──────────────────────────────────────────────
-def advanced_regex_rename(path: str, pattern: str, replacement: str, dry_run: bool, progress_callback) -> tuple:
-    """Batch rename files using regex find/replace."""
+def advanced_regex_rename(path: str, pattern: str, replacement: str, dry_run: bool, progress_callback, recursive: bool = False) -> tuple:
+    """Batch rename files using regex find/replace.
+    recursive=True processes files in subfolders too (previously this
+    operation silently only ever touched the top level, with no way to
+    tell from the UI).
+    """
     p = Path(path)
     try:
         regex = re.compile(pattern, re.IGNORECASE)
     except re.error as e:
         raise ValueError(f"Invalid regex pattern: {e}")
 
-    files = [f for f in p.iterdir() if f.is_file() and f.name != '.organizer_history.json']
+    if recursive:
+        files = [f for f in p.rglob('*') if f.is_file() and f.name != '.organizer_history.json']
+    else:
+        files = [f for f in p.iterdir() if f.is_file() and f.name != '.organizer_history.json']
     matches = [f for f in files if regex.search(f.name)]
 
     if not matches:
@@ -114,7 +111,7 @@ def advanced_regex_rename(path: str, pattern: str, replacement: str, dry_run: bo
             os.rename(file, final)
             history.append({"action": "move", "src": str(file), "dst": str(final)})
         else:
-            history.append((str(file), str(new_path)))
+            history.append({"action": "move", "src": str(file), "dst": str(new_path)})
 
         progress_callback(int(((idx + 1) / total) * 100))
 
@@ -124,23 +121,27 @@ def advanced_regex_rename(path: str, pattern: str, replacement: str, dry_run: bo
 # ──────────────────────────────────────────────
 # 3. Old File Cleanup
 # ──────────────────────────────────────────────
-def cleanup_old_files(path: str, days: int, dry_run: bool, progress_callback) -> tuple:
+def cleanup_old_files(path: str, days: int, dry_run: bool, progress_callback, recursive: bool = False) -> tuple:
     """
     Moves files older than `days` into a '.archived_files' subfolder.
     Skips protected extensions and system filenames.
+    recursive=True also finds candidates in subfolders.
     """
     p = Path(path)
     cutoff = datetime.datetime.now() - datetime.timedelta(days=days)
     archive_dir = p / '.archived_files'
 
+    source_iter = p.rglob('*') if recursive else p.iterdir()
     candidates = []
-    for f in p.iterdir():
+    for f in source_iter:
         if not f.is_file() or f.name == '.organizer_history.json':
             continue
         if f.name.lower() in _PROTECTED_NAMES:
             continue
         if f.suffix.lower() in _PROTECTED_EXTS:
             continue
+        if archive_dir in f.parents:
+            continue  # don't re-archive already-archived files
         try:
             mtime = datetime.datetime.fromtimestamp(f.stat().st_mtime)
             if mtime < cutoff:
@@ -154,13 +155,12 @@ def cleanup_old_files(path: str, days: int, dry_run: bool, progress_callback) ->
     total = len(candidates)
     history = []
     for idx, f in enumerate(candidates):
+        dest = archive_dir / f.name
         if not dry_run:
             archive_dir.mkdir(exist_ok=True)
             dest = _safe_dest(archive_dir, f.name)
             shutil.move(str(f), str(dest))
-            history.append({"action": "move", "src": str(f), "dst": str(dest)})
-        else:
-            history.append((str(f), str(archive_dir / f.name)))
+        history.append({"action": "move", "src": str(f), "dst": str(dest)})
         progress_callback(int(((idx + 1) / total) * 100))
 
     return history, total
@@ -169,12 +169,78 @@ def cleanup_old_files(path: str, days: int, dry_run: bool, progress_callback) ->
 # ──────────────────────────────────────────────
 # 4. Batch Unzipper
 # ──────────────────────────────────────────────
-def batch_unzip(path: str, dry_run: bool, progress_callback) -> tuple:
-    """Extracts common archives (.zip, .rar, .7z, .tar, etc.) into named subfolders."""
+
+class ArchiveSecurityError(Exception):
+    """Raised when an archive contains a member that would escape the
+    intended extraction directory (a.k.a. "zip slip" / path traversal)."""
+    pass
+
+
+def _assert_member_is_safe(member_name: str, out_dir: Path) -> Path:
+    """Resolves a member's target path and verifies it stays inside out_dir.
+    Rejects absolute paths, '..' traversal, and (on Windows) drive-letter
+    or UNC prefixes embedded in the member name.
+    """
+    if not member_name or member_name.strip() in ('', '.', '..'):
+        raise ArchiveSecurityError(f"Unsafe archive entry name: {member_name!r}")
+
+    # Reject absolute paths / drive letters outright before any join.
+    raw = member_name.replace('\\', '/')
+    if raw.startswith('/') or (len(raw) > 1 and raw[1] == ':'):
+        raise ArchiveSecurityError(f"Archive entry has an absolute path: {member_name!r}")
+
+    out_dir_resolved = out_dir.resolve(strict=False)
+    target = (out_dir / member_name).resolve(strict=False)
+
+    try:
+        target.relative_to(out_dir_resolved)
+    except ValueError:
+        raise ArchiveSecurityError(
+            f"Archive entry '{member_name}' would extract outside the target folder — blocked."
+        )
+    return target
+
+
+def _safe_extract_zip(zf_path: str, out_dir: Path):
+    with zipfile.ZipFile(zf_path, 'r') as archive:
+        for info in archive.infolist():
+            _assert_member_is_safe(info.filename, out_dir)
+        archive.extractall(path=str(out_dir))
+
+
+def _safe_extract_tar(tf_path: str, out_dir: Path):
+    with tarfile.open(tf_path, 'r:*') as archive:
+        for member in archive.getmembers():
+            _assert_member_is_safe(member.name, out_dir)
+            # Reject symlinks/hardlinks that point outside out_dir too.
+            if member.issym() or member.islnk():
+                _assert_member_is_safe(member.linkname, out_dir)
+        archive.extractall(path=str(out_dir))
+
+
+def _safe_extract_7z(zf_path: str, out_dir: Path):
+    with py7zr.SevenZipFile(zf_path, mode='r') as archive:
+        for name in archive.getnames():
+            _assert_member_is_safe(name, out_dir)
+        archive.extractall(path=str(out_dir))
+
+
+def _safe_extract_rar(zf_path: str, out_dir: Path):
+    with rarfile.RarFile(zf_path) as archive:
+        for name in archive.namelist():
+            _assert_member_is_safe(name, out_dir)
+        archive.extractall(path=str(out_dir))
+
+
+def batch_unzip(path: str, dry_run: bool, progress_callback, recursive: bool = False) -> tuple:
+    """Extracts common archives (.zip, .rar, .7z, .tar, etc.) into named subfolders.
+    recursive=True also finds archives in subfolders (each extracted next to
+    where it was found, not dumped at the workspace root)."""
     p = Path(path)
     # Detect a wider range of archive formats
     archive_exts = {'.zip', '.rar', '.7z', '.tar', '.gz', '.bz2', '.xz'}
-    archives = [f for f in p.iterdir() if f.is_file() and f.name != '.organizer_history.json' and f.suffix.lower() in archive_exts]
+    source_iter = p.rglob('*') if recursive else p.iterdir()
+    archives = [f for f in source_iter if f.is_file() and f.name != '.organizer_history.json' and f.suffix.lower() in archive_exts]
 
     if not archives:
         return [], 0, []
@@ -182,18 +248,19 @@ def batch_unzip(path: str, dry_run: bool, progress_callback) -> tuple:
     history = []
     errors = []
     for idx, zf in enumerate(archives):
-        # Use collision-safe destination
-        out_dir = _safe_dest(p, zf.stem)
+        # Use collision-safe destination, sibling to the archive itself
+        out_dir = _safe_dest(zf.parent, zf.stem)
         
         if not dry_run:
             try:
                 # Special handling for different formats
                 suffix = zf.suffix.lower()
                 
+                out_dir.mkdir(parents=True, exist_ok=True)
+
                 if suffix == '.7z':
                     if py7zr:
-                        with py7zr.SevenZipFile(str(zf), mode='r') as archive:
-                            archive.extractall(path=str(out_dir))
+                        _safe_extract_7z(str(zf), out_dir)
                     else:
                         raise ImportError("py7zr library is missing. Cannot extract .7z files.")
                 
@@ -201,8 +268,7 @@ def batch_unzip(path: str, dry_run: bool, progress_callback) -> tuple:
                     if rarfile:
                         # Attempt to find unrar/7z if not already configured
                         try:
-                            with rarfile.RarFile(str(zf)) as archive:
-                                archive.extractall(path=str(out_dir))
+                            _safe_extract_rar(str(zf), out_dir)
                         except rarfile.RarCannotExec:
                             # Try to find common installation paths for unrar.exe or 7z.exe
                             common_paths = [
@@ -219,15 +285,22 @@ def batch_unzip(path: str, dry_run: bool, progress_callback) -> tuple:
                                     break
                             
                             if found:
-                                with rarfile.RarFile(str(zf)) as archive:
-                                    archive.extractall(path=str(out_dir))
+                                _safe_extract_rar(str(zf), out_dir)
                             else:
                                 raise RuntimeError("RAR extraction requires WinRAR or 7-Zip installed in standard locations, or UnRAR.exe in PATH.")
                     else:
                         raise ImportError("rarfile library is missing. Cannot extract .rar files.")
-                
+
+                elif suffix == '.zip':
+                    _safe_extract_zip(str(zf), out_dir)
+
+                elif suffix in {'.tar', '.gz', '.bz2', '.xz'}:
+                    _safe_extract_tar(str(zf), out_dir)
+
                 else:
-                    # shutil handles multiple formats automatically (zip, tar, etc.)
+                    # Fallback for any other format shutil recognizes.
+                    # Not member-validated — only reached for extensions outside
+                    # our known-safe set, which archive_exts above already excludes.
                     shutil.unpack_archive(str(zf), str(out_dir))
                 
                 # Double check if anything was extracted
@@ -246,6 +319,8 @@ def batch_unzip(path: str, dry_run: bool, progress_callback) -> tuple:
                 err_msg = str(e)
                 if isinstance(e, shutil.ReadError):
                     err_msg = f"Format {zf.suffix} not supported by standard library. Please ensure additional tools are installed."
+                elif isinstance(e, ArchiveSecurityError):
+                    err_msg = f"Blocked for safety: {e}"
                 errors.append(f"{zf.name}: {err_msg}")
         else:
             history.append({"action": "create", "src": str(zf), "dst": str(out_dir)})
@@ -259,16 +334,20 @@ def batch_unzip(path: str, dry_run: bool, progress_callback) -> tuple:
 # ──────────────────────────────────────────────
 # 5. Large File Archiver
 # ──────────────────────────────────────────────
-def archive_large_files(path: str, threshold_mb: float, dry_run: bool, progress_callback) -> tuple:
-    """Moves files exceeding threshold_mb into a 'LargeFiles' subfolder."""
+def archive_large_files(path: str, threshold_mb: float, dry_run: bool, progress_callback, recursive: bool = False) -> tuple:
+    """Moves files exceeding threshold_mb into a 'LargeFiles' subfolder.
+    recursive=True also finds candidates in subfolders."""
     p = Path(path)
     threshold_bytes = threshold_mb * 1024 * 1024
     large_dir = p / 'LargeFiles'
 
+    source_iter = p.rglob('*') if recursive else p.iterdir()
     candidates = []
-    for f in p.iterdir():
+    for f in source_iter:
         if not f.is_file() or f.name == '.organizer_history.json':
             continue
+        if large_dir in f.parents:
+            continue  # don't re-archive already-archived files
         try:
             if f.stat().st_size >= threshold_bytes:
                 candidates.append(f)
@@ -281,13 +360,12 @@ def archive_large_files(path: str, threshold_mb: float, dry_run: bool, progress_
     total = len(candidates)
     history = []
     for idx, f in enumerate(candidates):
+        dest = large_dir / f.name
         if not dry_run:
             large_dir.mkdir(exist_ok=True)
             dest = _safe_dest(large_dir, f.name)
             shutil.move(str(f), str(dest))
-            history.append({"action": "move", "src": str(f), "dst": str(dest)})
-        else:
-            history.append((str(f), str(large_dir / f.name)))
+        history.append({"action": "move", "src": str(f), "dst": str(dest)})
         progress_callback(int(((idx + 1) / total) * 100))
 
     return history, total
@@ -332,9 +410,7 @@ def additive_backup(src: str, dest: str, dry_run: bool, progress_callback) -> tu
         if not dry_run:
             dst_f.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(str(src_f), str(dst_f))
-            history.append({"action": "copy", "src": str(src_f), "dst": str(dst_f)})
-        else:
-            history.append((str(src_f), str(dst_f)))
+        history.append({"action": "copy", "src": str(src_f), "dst": str(dst_f)})
         progress_callback(int(((idx + 1) / total) * 100))
 
     return history, total
@@ -343,11 +419,12 @@ def additive_backup(src: str, dest: str, dry_run: bool, progress_callback) -> tu
 # ──────────────────────────────────────────────
 # 7. Image Format Converter
 # ──────────────────────────────────────────────
-def convert_image_formats(path: str, source_exts: list, target_ext: str, dry_run: bool, progress_callback) -> tuple:
+def convert_image_formats(path: str, source_exts: list, target_ext: str, dry_run: bool, progress_callback, recursive: bool = False) -> tuple:
     """
     Converts images to target_ext using Pillow.
     source_exts: list of extensions to convert e.g. ['.png', '.bmp']
     target_ext: e.g. '.webp' or '.jpg'
+    recursive=True also converts images found in subfolders.
     """
     try:
         from PIL import Image
@@ -361,7 +438,8 @@ def convert_image_formats(path: str, source_exts: list, target_ext: str, dry_run
     # Normalize source extensions
     source_set = {(e if e.startswith('.') else f'.{e}').lower() for e in source_exts}
 
-    files = [f for f in p.iterdir() if f.is_file() and f.name != '.organizer_history.json' and f.suffix.lower() in source_set]
+    source_iter = p.rglob('*') if recursive else p.iterdir()
+    files = [f for f in source_iter if f.is_file() and f.name != '.organizer_history.json' and f.suffix.lower() in source_set]
     if not files:
         return [], 0
 
@@ -375,7 +453,7 @@ def convert_image_formats(path: str, source_exts: list, target_ext: str, dry_run
 
     for idx, f in enumerate(files):
         new_name = f.stem + target_ext
-        new_path = _safe_dest(p, new_name)
+        new_path = _safe_dest(f.parent, new_name) if not dry_run else (f.parent / new_name)
 
         if not dry_run:
             try:
@@ -386,9 +464,9 @@ def convert_image_formats(path: str, source_exts: list, target_ext: str, dry_run
                 img.save(new_path, out_format)
                 history.append({"action": "create", "src": str(f), "dst": str(new_path)})
             except Exception as e:
-                history.append((str(f), f"ERROR: {e}"))
+                history.append({"action": "error", "src": str(f), "dst": f"ERROR: {e}"})
         else:
-            history.append((str(f), str(new_path)))
+            history.append({"action": "create", "src": str(f), "dst": str(new_path)})
 
         progress_callback(int(((idx + 1) / total) * 100))
 

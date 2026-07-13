@@ -5,7 +5,7 @@ import json
 import datetime
 import threading
 from functools import wraps
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import List, Dict
 
 # Import refactored services
@@ -19,18 +19,24 @@ _SYSTEM_CRITICAL_DIRS = {
 }
 
 def is_system_critical_dir(path: str) -> bool:
-    """Returns True if path matches a known system-critical directory."""
+    """Returns True if path matches a known system-critical directory.
+
+    Uses PureWindowsPath explicitly for the parts/anchor analysis (this app
+    only ever ships and runs on Windows) rather than the platform-native
+    Path class, so the check behaves identically and deterministically
+    regardless of the OS it happens to be evaluated on.
+    """
     try:
-        p = Path(path).resolve(strict=False)
+        resolved = str(Path(path).resolve(strict=False))
     except Exception:
-        p = Path(path)
-    # Check all parts of the path
-    for part in p.parts:
-        if part.lower().rstrip('\\') in _SYSTEM_CRITICAL_DIRS:
+        resolved = str(path)
+
+    for candidate in (PureWindowsPath(resolved), PureWindowsPath(str(path))):
+        for part in candidate.parts:
+            if part.lower().rstrip('\\/') in _SYSTEM_CRITICAL_DIRS:
+                return True
+        if candidate.anchor and str(candidate) == candidate.anchor and len(candidate.anchor) <= 3:
             return True
-    # Also block root drive paths like C:\ directly
-    if p == p.anchor and len(str(p)) <= 4:
-        return True
     return False
 
 import subprocess
@@ -40,7 +46,15 @@ def requires_lock(func):
     @wraps(func)
     def wrapper(self, *args, **kwargs):
         with self._lock:
-            return func(self, *args, **kwargs)
+            self._last_history_error = None
+            result = func(self, *args, **kwargs)
+            # If the wrapped call touched undo-history persistence and it
+            # failed, surface it instead of letting the operation report a
+            # clean "Successfully..." message while Undo silently won't work.
+            if isinstance(result, dict) and result.get("success") and self._last_history_error:
+                result["message"] = f"{result.get('message', '')} ⚠ {self._last_history_error}".strip()
+                result["history_warning"] = self._last_history_error
+            return result
     return wrapper
 
 class OrganizerAPI:
@@ -49,6 +63,7 @@ class OrganizerAPI:
         self._history = [] # Stores (old_path, new_path) tuples
         self._current_workspace = None
         self._lock = threading.Lock()
+        self._last_history_error = None
 
     def set_window(self, window):
         self._window = window
@@ -60,7 +75,13 @@ class OrganizerAPI:
 
 
     def _load_history(self, workspace_path: str):
-        """Loads undo history from a hidden file in the workspace."""
+        """Loads undo history from a hidden file in the workspace.
+        On failure, resets to empty history but records the failure reason
+        so the UI can warn the user instead of silently pretending nothing
+        happened (a corrupted/unreadable history file previously failed
+        completely silently).
+        """
+        self._last_history_error = None
         try:
             history_path = Path(workspace_path) / '.organizer_history.json'
             if history_path.exists():
@@ -68,32 +89,42 @@ class OrganizerAPI:
                     self._history = json.load(f)
             else:
                 self._history = []
-        except:
+        except Exception as e:
             self._history = []
+            self._last_history_error = f"Could not read undo history for this workspace: {e}"
 
     def _save_history(self):
-        """Saves current undo history to the workspace using atomic writes."""
+        """Saves current undo history to the workspace using atomic writes.
+        Returns True on success, False on failure. Failures are recorded
+        (not swallowed) so callers can warn the user that Undo may not work
+        for the operation that just ran.
+        """
+        self._last_history_error = None
         if not self._current_workspace:
-            return
+            return True
         try:
             history_path = Path(self._current_workspace) / '.organizer_history.json'
             tmp_path = history_path.with_suffix('.json.tmp')
             with open(tmp_path, 'w', encoding='utf-8') as f:
                 json.dump(self._history, f, indent=2)
             os.replace(tmp_path, history_path)
-        except:
-            pass
+            return True
+        except Exception as e:
+            self._last_history_error = f"Operation succeeded, but undo history could not be saved: {e}"
+            return False
 
     def select_folder(self, purpose="workspace"):
         result = self._window.create_file_dialog(webview.FOLDER_DIALOG)
         if result:
             path = result[0]
+            history_warning = None
             if purpose == "workspace":
                 self._current_workspace = path
                 self._load_history(self._current_workspace)
-            
+                history_warning = self._last_history_error
+
             system_warning = is_system_critical_dir(path)
-            return {"path": path, "system_warning": system_warning}
+            return {"path": path, "system_warning": system_warning, "history_warning": history_warning}
         return None
 
     def select_file(self, file_types: str = "All files (*.*)"):
@@ -207,23 +238,30 @@ class OrganizerAPI:
                 self._save_history()
 
             msg = f"Simulation: {count} items would be renamed." if dry_run else f"Successfully organized {count} items."
-            return {"success": True, "message": msg}
+            resp = {"success": True, "message": msg}
+            if dry_run: resp["items"] = new_history
+            return resp
         except Exception as e:
             return {"success": False, "error": str(e)}
 
-    def find_duplicates(self, path: str, options=None):
+    def find_duplicates(self, path: str, options=None, keep_by: str = "oldest"):
+        """keep_by controls which file in each duplicate group is treated as
+        the one to keep (index 0): 'oldest' (default), 'newest', or
+        'shortest_path'. Previously this was an undocumented, arbitrary
+        filesystem-iteration-order choice — now it's explicit and deterministic.
+        """
         if is_system_critical_dir(path):
             return {"success": False, "error": f"Operation blocked: '{path}' is a system-critical directory."}
         try:
-            dupes = duplicate_service.find_duplicates(path, self._update_progress)
+            dupes = duplicate_service.find_duplicates(path, self._update_progress, keep_by)
             if not dupes:
                 return {"success": True, "message": "No duplicates found.", "duplicates": []}
-            return {"success": True, "message": f"Found {len(dupes)} groups of duplicates.", "duplicates": dupes}
+            return {"success": True, "message": f"Found {len(dupes)} groups of duplicates.", "duplicates": dupes, "keep_by": keep_by}
         except Exception as e:
             return {"success": False, "error": str(e)}
 
     @requires_lock
-    def delete_duplicates(self, path: str, groups: list, dry_run: bool = False):
+    def delete_duplicates(self, path: str, groups: list, dry_run: bool = False, keep_by: str = "oldest"):
         if is_system_critical_dir(path):
             return {"success": False, "error": f"Operation blocked: '{path}' is a system-critical directory."}
         try:
@@ -231,7 +269,7 @@ class OrganizerAPI:
                 total_to_delete = sum(len(group) - 1 for group in groups)
                 return {"success": True, "message": f"Simulation: {total_to_delete} duplicate files would be removed."}
 
-            count = duplicate_service.delete_duplicates(groups, self._update_progress)
+            count = duplicate_service.delete_duplicates(groups, self._update_progress, keep_by)
             return {"success": True, "message": f"Successfully moved {count} duplicates to Recycle Bin."}
         except Exception as e:
             return {"success": False, "error": str(e)}
@@ -247,7 +285,9 @@ class OrganizerAPI:
                 self._save_history()
 
             msg = f"Simulation: {count} files would be sorted." if dry_run else f"Successfully sorted {count} files."
-            return {"success": True, "message": msg}
+            resp = {"success": True, "message": msg}
+            if dry_run: resp["items"] = new_history
+            return resp
         except Exception as e:
             return {"success": False, "error": str(e)}
 
@@ -271,19 +311,22 @@ class OrganizerAPI:
             return {"success": False, "error": str(e)}
 
     @requires_lock
-    def change_extensions(self, path: str, old_ext: str, new_ext: str, dry_run: bool = False, filter_str: str = ""):
+    def change_extensions(self, path: str, old_ext: str, new_ext: str, dry_run: bool = False, filter_str: str = "", recursive: bool = False):
         if is_system_critical_dir(path):
             return {"success": False, "error": f"Operation blocked: '{path}' is a system-critical directory."}
         try:
             p = Path(path)
             if not old_ext.startswith('.'): old_ext = '.' + old_ext
             if not new_ext.startswith('.'): new_ext = '.' + new_ext
-            files = [f for f in p.iterdir() if f.is_file() and f.suffix.lower() == old_ext.lower()]
+            source_iter = p.rglob('*') if recursive else p.iterdir()
+            files = [f for f in source_iter if f.is_file() and f.suffix.lower() == old_ext.lower()]
             if filter_str:
                 files = [f for f in files if filter_str.lower() in f.name.lower()]
 
             if not files: return {"success": True, "message": f"No matching {old_ext} files found."}
-            if dry_run: return {"success": True, "message": f"Simulation: {len(files)} files would be converted."}
+            if dry_run:
+                items = [{"action": "move", "src": str(f), "dst": str(f.with_suffix(new_ext))} for f in files]
+                return {"success": True, "message": f"Simulation: {len(files)} files would be converted.", "items": items}
 
             for idx, file in enumerate(files):
                 if file_service.is_locked(file):
@@ -304,7 +347,9 @@ class OrganizerAPI:
                 self._history = new_history
                 self._save_history()
             msg = f"Simulation: {count} files would be flattened." if dry_run else f"Successfully flattened {count} files."
-            return {"success": True, "message": msg}
+            resp = {"success": True, "message": msg}
+            if dry_run: resp["items"] = new_history
+            return resp
         except Exception as e:
             return {"success": False, "error": str(e)}
 
@@ -350,7 +395,9 @@ class OrganizerAPI:
                 self._history = new_history
                 self._save_history()
             msg = f"Simulation: {count} files would be categorized." if dry_run else f"Successfully categorized {count} files."
-            return {"success": True, "message": msg}
+            resp = {"success": True, "message": msg}
+            if dry_run: resp["items"] = new_history
+            return resp
         except Exception as e:
             return {"success": False, "error": str(e)}
 
@@ -392,42 +439,46 @@ class OrganizerAPI:
             return {"success": False, "error": str(e)}
 
     @requires_lock
-    def advanced_regex_rename(self, path: str, pattern: str, replacement: str, dry_run: bool = False):
+    def advanced_regex_rename(self, path: str, pattern: str, replacement: str, dry_run: bool = False, recursive: bool = False):
         """Batch rename files using regex find/replace."""
         try:
             if is_system_critical_dir(path):
                 return {"success": False, "error": "System-critical directory. Operation blocked."}
-            history, count = automation_service.advanced_regex_rename(path, pattern, replacement, dry_run, self._update_progress)
+            history, count = automation_service.advanced_regex_rename(path, pattern, replacement, dry_run, self._update_progress, recursive)
             if not dry_run:
                 self._history = history
                 self._save_history()
             msg = f"Simulation: {count} files would be renamed." if dry_run else f"Renamed {count} files."
-            return {"success": True, "message": msg}
+            resp = {"success": True, "message": msg}
+            if dry_run: resp["items"] = history
+            return resp
         except Exception as e:
             return {"success": False, "error": str(e)}
 
     @requires_lock
-    def cleanup_old_files(self, path: str, days: int = 90, dry_run: bool = False):
+    def cleanup_old_files(self, path: str, days: int = 90, dry_run: bool = False, recursive: bool = False):
         """Archives files older than `days` to a .archived_files subfolder."""
         try:
             if is_system_critical_dir(path):
                 return {"success": False, "error": "System-critical directory. Operation blocked."}
-            history, count = automation_service.cleanup_old_files(path, days, dry_run, self._update_progress)
+            history, count = automation_service.cleanup_old_files(path, days, dry_run, self._update_progress, recursive)
             if not dry_run:
                 self._history = history
                 self._save_history()
             msg = f"Simulation: {count} files older than {days} days would be archived." if dry_run else f"Archived {count} old files."
-            return {"success": True, "message": msg}
+            resp = {"success": True, "message": msg}
+            if dry_run: resp["items"] = history
+            return resp
         except Exception as e:
             return {"success": False, "error": str(e)}
 
     @requires_lock
-    def batch_unzip(self, path: str, dry_run: bool = False):
+    def batch_unzip(self, path: str, dry_run: bool = False, recursive: bool = False):
         """Extracts common archives (.zip, .rar, .7z, etc.) into named subfolders."""
         try:
             if is_system_critical_dir(path):
                 return {"success": False, "error": "System-critical directory. Operation blocked."}
-            history, count, errors = automation_service.batch_unzip(path, dry_run, self._update_progress)
+            history, count, errors = automation_service.batch_unzip(path, dry_run, self._update_progress, recursive)
             if not dry_run:
                 self._history = history
                 self._save_history()
@@ -442,24 +493,26 @@ class OrganizerAPI:
             return {
                 "success": True, 
                 "message": msg, 
-                "items": [h['dst'] for h in history],
+                "items": history,
                 "errors": errors
             }
         except Exception as e:
             return {"success": False, "error": str(e)}
 
     @requires_lock
-    def archive_large_files(self, path: str, threshold_mb: float = 500.0, dry_run: bool = False):
+    def archive_large_files(self, path: str, threshold_mb: float = 500.0, dry_run: bool = False, recursive: bool = False):
         """Moves files over threshold_mb MB into a LargeFiles subfolder."""
         try:
             if is_system_critical_dir(path):
                 return {"success": False, "error": "System-critical directory. Operation blocked."}
-            history, count = automation_service.archive_large_files(path, threshold_mb, dry_run, self._update_progress)
+            history, count = automation_service.archive_large_files(path, threshold_mb, dry_run, self._update_progress, recursive)
             if not dry_run:
                 self._history = history
                 self._save_history()
             msg = f"Simulation: {count} files over {threshold_mb}MB would be moved." if dry_run else f"Moved {count} large files."
-            return {"success": True, "message": msg}
+            resp = {"success": True, "message": msg}
+            if dry_run: resp["items"] = history
+            return resp
         except Exception as e:
             return {"success": False, "error": str(e)}
 
@@ -474,22 +527,26 @@ class OrganizerAPI:
                 self._history = history
                 self._save_history()
             msg = f"Simulation: {count} files would be backed up." if dry_run else f"Backed up {count} files."
-            return {"success": True, "message": msg}
+            resp = {"success": True, "message": msg}
+            if dry_run: resp["items"] = history
+            return resp
         except Exception as e:
             return {"success": False, "error": str(e)}
 
     @requires_lock
-    def convert_image_formats(self, path: str, source_exts: list, target_ext: str, dry_run: bool = False):
+    def convert_image_formats(self, path: str, source_exts: list, target_ext: str, dry_run: bool = False, recursive: bool = False):
         """Batch converts images to target format using Pillow."""
         try:
             if is_system_critical_dir(path):
                 return {"success": False, "error": "System-critical directory. Operation blocked."}
-            history, count = automation_service.convert_image_formats(path, source_exts, target_ext, dry_run, self._update_progress)
+            history, count = automation_service.convert_image_formats(path, source_exts, target_ext, dry_run, self._update_progress, recursive)
             if not dry_run:
                 self._history = history
                 self._save_history()
             msg = f"Simulation: {count} images would be converted." if dry_run else f"Converted {count} images."
-            return {"success": True, "message": msg}
+            resp = {"success": True, "message": msg}
+            if dry_run: resp["items"] = history
+            return resp
         except Exception as e:
             return {"success": False, "error": str(e)}
 

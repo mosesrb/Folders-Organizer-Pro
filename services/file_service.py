@@ -11,6 +11,20 @@ def get_size_str(size_bytes: int) -> str:
         size_bytes /= 1024
     return f"{size_bytes:.2f} PB"
 
+def safe_dest(target_dir: Path, filename: str) -> Path:
+    """Returns a collision-free destination path, appending _1, _2... as needed.
+    Single source of truth — previously duplicated in organizer_service.py and
+    automation_service.py.
+    """
+    stem = Path(filename).stem
+    suffix = Path(filename).suffix
+    dest = target_dir / filename
+    counter = 1
+    while dest.exists():
+        dest = target_dir / f"{stem}_{counter}{suffix}"
+        counter += 1
+    return dest
+
 def is_locked(path: Path) -> bool:
     """Checks if a file or folder is currently locked by another process."""
     try:

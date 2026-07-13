@@ -3,7 +3,36 @@ import hashlib
 import send2trash
 from pathlib import Path
 
-def find_duplicates(path: str, progress_callback):
+
+def _sort_group_keep_first(group: list, keep_by: str = "oldest") -> list:
+    """Returns the group re-ordered so the file to KEEP is always index 0,
+    using a deterministic, explainable rule instead of whatever arbitrary
+    order os.scandir() happened to return.
+
+    keep_by:
+      - "oldest":       keep the file with the earliest modified time (default —
+                         treats the first-created copy as the "original")
+      - "newest":       keep the file with the latest modified time
+      - "shortest_path": keep the file living closest to the scan root
+                         (fewer path segments = less "buried")
+    """
+    def _mtime(f):
+        try:
+            return os.path.getmtime(f)
+        except OSError:
+            return float('inf')
+
+    def _depth(f):
+        return len(Path(f).parts)
+
+    if keep_by == "newest":
+        return sorted(group, key=_mtime, reverse=True)
+    elif keep_by == "shortest_path":
+        return sorted(group, key=lambda f: (_depth(f), _mtime(f)))
+    # default: oldest
+    return sorted(group, key=_mtime)
+
+def find_duplicates(path: str, progress_callback, keep_by: str = "oldest"):
     """Finds duplicate files based on content hash using multi-stage verification."""
     files_by_size = {}
 
@@ -70,11 +99,18 @@ def find_duplicates(path: str, progress_callback):
 
         for fh, fpaths in full_hashes.items():
             if len(fpaths) > 1:
-                real_duplicates.append(fpaths)
+                real_duplicates.append(_sort_group_keep_first(fpaths, keep_by))
 
     return real_duplicates
 
-def delete_duplicates(groups: list, progress_callback):
+def delete_duplicates(groups: list, progress_callback, keep_by: str = "oldest"):
+    # Re-apply the same deterministic ordering here too, in case the caller
+    # passes groups back in a different order than find_duplicates returned
+    # (e.g. after round-tripping through the UI/JSON bridge). This guarantees
+    # index 0 — the file that's kept — is always chosen by the stated rule,
+    # never by arbitrary filesystem iteration order.
+    groups = [_sort_group_keep_first(g, keep_by) for g in groups]
+
     total_to_delete = sum(len(group) - 1 for group in groups)
     if total_to_delete == 0:
         return 0

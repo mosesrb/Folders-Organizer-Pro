@@ -75,7 +75,7 @@ Bulk file operations require absolute confidence.
 - **Critical Shield (HARDENED)**: Comprehensive immunity for Windows system folders (`System32`, `Program Files`, etc.). Applied across the entire API surface to prevent any operation in sensitive areas.
 - **Simulation Mode (Dry-Run)**: Every automation supports a safe simulation. Visualize changes in the dashboard before a single file is moved.
 - **Live Console Engine**: A persistent log stream that tracks heavy operations in real-time, providing total transparency. **If an extraction fails (e.g., .7z or .rar), check the Live Console for detailed diagnostic logs.**
-- **Atomic Undo**: Every session generates an encrypted `.organizer_history.json`. Revert any move, rename, or categorization with one click.
+- **Atomic Undo**: Every session generates a local `.organizer_history.json`, written using an atomic write (temp file + replace) so it can't be left corrupted by a crash mid-save. Revert any move, rename, or categorization with one click. *(This file is plain JSON, not encrypted — it lives inside the workspace folder you're organizing.)*
 - **Recycle Bin Path**: Deleted duplicates are moved to the system Recycle Bin, not permanently erased.
 
 ### 🧠 Intelligent Hashing & Win32 Compatibility

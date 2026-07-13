@@ -1,6 +1,7 @@
-pywebview
-pathlib
-typing
-send2trash
-py7zr
-rarfile
+pywebview>=4.4
+send2trash>=1.8
+py7zr>=0.20
+rarfile>=4.1
+Pillow>=10.0,<12.0
+pypdf>=4.0
+miniaudio>=1.59

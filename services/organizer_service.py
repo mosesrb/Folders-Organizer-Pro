@@ -4,18 +4,7 @@ import re
 import datetime
 import json
 from pathlib import Path
-from .file_service import is_locked
-
-def _safe_dest(target_dir: Path, filename: str) -> Path:
-    """Returns a collision-free destination path, appending _1, _2... as needed."""
-    stem = Path(filename).stem
-    suffix = Path(filename).suffix
-    dest = target_dir / filename
-    counter = 1
-    while dest.exists():
-        dest = target_dir / f"{stem}_{counter}{suffix}"
-        counter += 1
-    return dest
+from .file_service import is_locked, safe_dest as _safe_dest
 
 def sequential_rename(path: str, prefix: str, mode: str, sort_mode: str, dry_run: bool, filter_str: str, use_regex: bool, progress_callback):
     p = Path(path)
@@ -55,7 +44,9 @@ def sequential_rename(path: str, prefix: str, mode: str, sort_mode: str, dry_run
 
         new_path = item.with_name(new_name)
 
-        if not dry_run:
+        if dry_run:
+            new_history.append({"action": "move", "src": str(item), "dst": str(new_path)})
+        else:
             if is_locked(item):
                 raise IOError(f"Item '{item.name}' is busy.")
 
@@ -86,9 +77,6 @@ def sort_by_date(path: str, grain: str, dry_run: bool, progress_callback):
     if not files:
         return [], 0
 
-    if dry_run:
-        return [], len(files)
-
     total = len(files)
     new_history = []
     for idx, file in enumerate(files):
@@ -99,10 +87,18 @@ def sort_by_date(path: str, grain: str, dry_run: bool, progress_callback):
         if grain == "day":
             target_dir = target_dir / str(mtime.day)
 
-        target_dir.mkdir(parents=True, exist_ok=True)
-        dest = _safe_dest(target_dir, file.name)
-        shutil.move(str(file), str(dest))
-        new_history.append({"action": "move", "src": str(file), "dst": str(dest)})
+        if dry_run:
+            # Preview-only: compute the planned destination without creating
+            # folders or moving anything, and without consuming a collision
+            # slot (multiple simulated files could plan to land on the same
+            # not-yet-created path).
+            planned_dest = target_dir / file.name
+            new_history.append({"action": "move", "src": str(file), "dst": str(planned_dest)})
+        else:
+            target_dir.mkdir(parents=True, exist_ok=True)
+            dest = _safe_dest(target_dir, file.name)
+            shutil.move(str(file), str(dest))
+            new_history.append({"action": "move", "src": str(file), "dst": str(dest)})
         progress_callback(int(((idx + 1) / total) * 100))
 
     return new_history, total
@@ -128,7 +124,11 @@ def flatten_workspace(path: str, dry_run: bool, progress_callback):
         return [], 0
 
     if dry_run:
-        return [], len(files_to_move)
+        preview = []
+        for file in files_to_move:
+            dest = p / file.name
+            preview.append({"action": "move", "src": str(file), "dst": str(dest)})
+        return preview, len(files_to_move)
 
     total = len(files_to_move)
     new_history = []
@@ -179,24 +179,28 @@ def smart_categorize(path: str, dry_run: bool, custom_rules: list, progress_call
 
     files = [f for f in p.iterdir() if f.is_file() and f.name != '.organizer_history.json']
     if not files: return [], 0
-    if dry_run: return [], len(files)
 
-    new_history = []
-    for idx, file in enumerate(files):
-        target_cat = None
+    def _target_category(file):
         name_lower = file.name.lower()
         for cat, keys in keywords.items():
             if any(k in name_lower for k in keys):
-                target_cat = cat
-                break
-        if not target_cat:
-            ext = file.suffix.lower()
-            for cat, exts in category_map.items():
-                if ext in exts:
-                    target_cat = cat
-                    break
-        if not target_cat: target_cat = "Uncategorized"
+                return cat
+        ext = file.suffix.lower()
+        for cat, exts in category_map.items():
+            if ext in exts:
+                return cat
+        return "Uncategorized"
 
+    if dry_run:
+        preview = []
+        for file in files:
+            target_dir = p / _target_category(file)
+            preview.append({"action": "move", "src": str(file), "dst": str(target_dir / file.name)})
+        return preview, len(files)
+
+    new_history = []
+    for idx, file in enumerate(files):
+        target_cat = _target_category(file)
         target_dir = p / target_cat
         target_dir.mkdir(parents=True, exist_ok=True)
         dest = _safe_dest(target_dir, file.name)
