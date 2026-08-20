@@ -67,4 +67,10 @@ BACKUP/
 docs/architecture.md
 docs/memories.md
 
+# Local build tools
+inno_setup_bin/
+inno_setup_installer.exe
+inno_setup_7.exe
+
+
 
