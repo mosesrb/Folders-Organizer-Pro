@@ -2,18 +2,192 @@
 @tailwind components;
 @tailwind utilities;
 
-:root {
+:root, [data-theme="light"] {
   color-scheme: light;
+
+  /* Every value below is a raw "R G B" triplet, not a hex string — this is
+     required for Tailwind's opacity-modifier syntax (bg-primary/20,
+     border-slate-300/50, etc., used ~50+ times throughout the app) to
+     work, since Tailwind wraps these in rgb(var(--x) / <alpha-value>).
+     Do not switch these back to hex or every /NN usage in the app breaks
+     silently (falls back to opaque, no error). */
+  --color-background: 243 238 228;
+  --color-secondary: 234 225 205;
+  --color-card: 251 248 241;
+  --color-ink: 31 27 22;
+  --color-ink-soft: 74 66 56;
+  --color-primary: 139 106 63;
+  --color-primary-dark: 107 79 44;
+  --color-primary-light: 176 131 86;
+  --color-accent: 138 46 46;
+  --color-filed: 61 90 69;
+  --color-filed-light: 92 122 98;
+  --color-filed-dark: 42 64 48;
+  --on-primary: 251 248 241;
+  --on-accent: 251 248 241;
+  --on-filed: 251 248 241;
+  --on-amber: 251 248 241;
+  --slate-50: 251 248 241;
+  --slate-100: 243 238 228;
+  --slate-200: 234 225 205;
+  --slate-300: 216 205 184;
+  --slate-400: 183 169 140;
+  --slate-500: 140 127 104;
+  --slate-600: 107 95 77;
+  --slate-700: 74 66 56;
+  --slate-800: 51 41 30;
+  --slate-900: 36 29 21;
+  --slate-950: 31 27 22;
+  --red-300: 217 163 163;
+  --red-400: 196 110 110;
+  --red-500: 168 61 61;
+  --red-600: 138 46 46;
+  --red-700: 110 35 35;
+  --red-800: 82 26 26;
+  --red-900: 58 18 18;
+  --pink-300: 217 191 163;
+  --pink-400: 196 154 110;
+  --pink-500: 176 131 86;
+  --pink-600: 139 106 63;
+  --pink-700: 107 79 44;
+  --indigo-300: 201 187 163;
+  --indigo-400: 166 140 99;
+  --indigo-500: 139 106 63;
+  --indigo-600: 107 79 44;
+  --indigo-700: 82 61 34;
+  --violet-300: 196 178 154;
+  --violet-400: 156 126 82;
+  --violet-500: 125 97 54;
+  --violet-600: 107 79 44;
+  --cyan-300: 183 169 140;
+  --cyan-400: 140 127 104;
+  --cyan-500: 139 106 63;
+  --cyan-600: 107 79 44;
+  --cyan-700: 82 61 34;
+  --sky-400: 140 127 104;
+  --sky-500: 139 106 63;
+  --sky-600: 107 79 44;
+  --teal-400: 122 150 131;
+  --teal-500: 92 122 98;
+  --teal-600: 61 90 69;
+  --emerald-300: 169 194 174;
+  --emerald-400: 122 150 131;
+  --emerald-500: 92 122 98;
+  --emerald-600: 61 90 69;
+  --emerald-700: 42 64 48;
+  --orange-400: 192 130 71;
+  --orange-500: 160 99 47;
+  --orange-600: 130 78 36;
+  --amber-400: 199 154 86;
+  --amber-500: 168 122 52;
+  --amber-600: 139 98 38;
+
+  --surface-default: rgba(31, 27, 22, 0.03);
+  --surface-hover: rgba(31, 27, 22, 0.06);
+  --surface-border: rgba(31, 27, 22, 0.14);
+  --paper-grain: rgba(31, 27, 22, 0.035);
 }
 
+/* Dark mode — "Filing Cabinet at night": warm espresso/walnut tones, not a
+   cold blue-black. Structural neutrals (the slate ramp, and the 9
+   card-accent families that were already just slight hue variations of
+   it) are lightness-inverted so each shade keeps the same *role* across
+   themes (100 = closest to page background, 900 = closest to ink) while
+   actually rendering correctly on a dark page. Fill colors used on
+   buttons (primary/accent/filed) are handled differently: primary is left
+   unchanged (it already has enough contrast as bold/large heading text in
+   both themes, and unchanged keeps every bg-primary button's fixed cream
+   text valid in both themes) while accent/filed are brightened for
+   standalone text/icon legibility — see the on-accent/on-filed tokens for
+   how their button-fill pairing stays correct despite that. */
+[data-theme="dark"] {
+  color-scheme: dark;
+
+  --color-background: 23 19 16;
+  --color-secondary: 36 30 23;
+  --color-card: 33 27 21;
+  --color-ink: 243 238 228;
+  --color-ink-soft: 201 187 163;
+  --color-primary: 139 106 63;
+  --color-primary-dark: 107 79 44;
+  --color-primary-light: 201 164 109;
+  --color-accent: 208 104 96;
+  --color-filed: 107 148 120;
+  --color-filed-light: 143 183 154;
+  --color-filed-dark: 74 107 84;
+  --on-primary: 251 248 241;
+  --on-accent: 36 29 21;
+  --on-filed: 36 29 21;
+  --on-amber: 36 29 21;
+  --slate-50: 14 11 4;
+  --slate-100: 27 22 12;
+  --slate-200: 50 41 21;
+  --slate-300: 71 60 39;
+  --slate-400: 115 101 72;
+  --slate-500: 151 138 115;
+  --slate-600: 178 166 148;
+  --slate-700: 199 191 181;
+  --slate-800: 225 215 204;
+  --slate-900: 234 227 219;
+  --slate-950: 233 229 224;
+  --red-300: 95 35 35;
+  --red-400: 149 55 55;
+  --red-500: 199 82 82;
+  --red-600: 214 112 112;
+  --red-700: 224 141 141;
+  --red-800: 232 170 170;
+  --red-900: 239 195 195;
+  --pink-300: 93 66 37;
+  --pink-400: 147 103 57;
+  --pink-500: 171 124 77;
+  --pink-600: 194 159 114;
+  --pink-700: 213 183 146;
+  --indigo-300: 93 78 53;
+  --indigo-400: 158 130 87;
+  --indigo-500: 194 159 114;
+  --indigo-600: 213 183 146;
+  --indigo-700: 222 200 172;
+  --violet-300: 102 83 58;
+  --violet-400: 175 143 97;
+  --violet-500: 203 173 128;
+  --violet-600: 213 183 146;
+  --cyan-300: 116 101 71;
+  --cyan-400: 152 138 114;
+  --cyan-500: 194 159 114;
+  --cyan-600: 213 183 146;
+  --cyan-700: 222 200 172;
+  --sky-400: 152 138 114;
+  --sky-500: 194 159 114;
+  --sky-600: 213 183 146;
+  --teal-400: 104 134 114;
+  --teal-500: 132 164 139;
+  --teal-600: 164 195 173;
+  --emerald-300: 60 87 66;
+  --emerald-400: 104 134 114;
+  --emerald-500: 132 164 139;
+  --emerald-600: 164 195 173;
+  --emerald-700: 190 214 197;
+  --orange-400: 187 122 60;
+  --orange-500: 211 147 92;
+  --orange-600: 221 167 123;
+  --amber-400: 172 125 53;
+  --amber-500: 206 158 84;
+  --amber-600: 220 176 113;
+
+  --surface-default: rgba(243, 238, 228, 0.04);
+  --surface-hover: rgba(243, 238, 228, 0.07);
+  --surface-border: rgba(243, 238, 228, 0.16);
+  --paper-grain: rgba(243, 238, 228, 0.035);
+}
 body {
   @apply bg-background text-ink font-sans selection:bg-primary/20;
   margin: 0;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   background-image:
-    radial-gradient(rgba(31,27,22,0.035) 1px, transparent 1px);
+    radial-gradient(var(--paper-grain) 1px, transparent 1px);
   background-size: 3px 3px;
+  transition: background-color 0.25s ease, color 0.25s ease;
 }
 
 h1, h2, h3, .font-heading {
@@ -26,12 +200,12 @@ h1, h2, h3, .font-heading {
 }
 
 .glass-card {
-  @apply bg-[#FBF8F1] border border-slate-300 hover:border-primary/50 transition-all duration-300 rounded-lg p-6;
+  @apply bg-card border border-slate-300 hover:border-primary/50 transition-all duration-300 rounded-lg p-6;
   box-shadow: 1px 2px 0 rgba(31, 27, 22, 0.06), 2px 4px 8px rgba(31, 27, 22, 0.04);
 }
 
 .glass-input {
-  @apply bg-[#FBF8F1] border border-slate-300 rounded-md px-4 py-3 text-sm text-ink placeholder:text-slate-500 focus:border-primary focus:ring-1 focus:ring-primary/20 outline-none transition-all;
+  @apply bg-card border border-slate-300 rounded-md px-4 py-3 text-sm text-ink placeholder:text-slate-500 focus:border-primary focus:ring-1 focus:ring-primary/20 outline-none transition-all;
 }
 
 /* Button System — flat, stamped, no glow */
@@ -45,7 +219,7 @@ h1, h2, h3, .font-heading {
 }
 
 .btn-accent {
-  @apply bg-accent/10 border border-accent/30 text-accent hover:bg-accent hover:text-[#FBF8F1] px-6 py-2.5 rounded-md font-bold transition-all active:scale-[0.97];
+  @apply bg-accent/10 border border-accent/30 text-accent hover:bg-accent hover:text-on-accent px-6 py-2.5 rounded-md font-bold transition-all active:scale-[0.97];
 }
 
 /* Custom Utilities */
@@ -82,7 +256,7 @@ h1, h2, h3, .font-heading {
 }
 
 .folder-tab.active {
-  @apply bg-[#FBF8F1];
-  box-shadow: 0 -1px 0 #FBF8F1;
+  @apply bg-card;
+  box-shadow: 0 -1px 0 var(--color-card);
 }
 

@@ -1,0 +1,32 @@
+<svg viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+  <!-- Background: flat manila-brown rounded square, no gradient -->
+  <rect x="0" y="0" width="512" height="512" rx="108" fill="#8B6A3F"/>
+
+  <!-- Folder tab (back flap, sits behind/above the body) -->
+  <path d="M 106 168
+           Q 106 152 122 152
+           L 224 152
+           Q 234 152 240 160
+           L 258 184
+           L 388 184
+           Q 404 184 404 200
+           L 404 210
+           L 106 210
+           Z"
+        fill="#E4D9C4"/>
+
+  <!-- Folder body -->
+  <rect x="96" y="196" width="320" height="184" rx="18" fill="#FBF8F1"/>
+
+  <!-- Fold line for a touch of flat, non-gradient depth -->
+  <line x1="96" y1="196" x2="416" y2="196" stroke="#E4D9C4" stroke-width="4"/>
+
+  <!-- Stamp: circular rubber-stamp mark, slightly rotated, overlapping the folder's lower-right corner -->
+  <g transform="rotate(-14 360 328)">
+    <circle cx="360" cy="328" r="74" fill="#8A2E2E" stroke="#FBF8F1" stroke-width="7"/>
+    <!-- checkmark -->
+    <path d="M 322 330 L 348 356 L 400 300"
+          fill="none" stroke="#FBF8F1" stroke-width="15"
+          stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+</svg>

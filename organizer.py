@@ -291,24 +291,10 @@ class OrganizerAPI:
         except Exception as e:
             return {"success": False, "error": str(e)}
 
-    @requires_lock
-    def zip_folders(self, path: str, dry_run: bool = False):
-        if is_system_critical_dir(path):
-            return {"success": False, "error": f"Operation blocked: '{path}' is a system-critical directory."}
-        try:
-            p = Path(path)
-            folders = [f for f in p.iterdir() if f.is_dir()]
-            if not folders: return {"success": True, "message": "No folders found."}
-            if dry_run: return {"success": True, "message": f"Simulation: {len(folders)} folders would be zipped."}
-
-            for idx, folder in enumerate(folders):
-                if file_service.is_locked(folder):
-                    return {"success": False, "error": f"Cannot access {folder.name}."}
-                shutil.make_archive(str(folder), 'zip', str(folder))
-                self._update_progress(int(((idx + 1) / len(folders)) * 100))
-            return {"success": True, "message": f"Successfully created {len(folders)} archives."}
-        except Exception as e:
-            return {"success": False, "error": str(e)}
+    # zip_folders (unconditionally zipped every folder in the workspace, no
+    # selection, no collision guard, no undo history) was removed in favor
+    # of batch_zip_folders below, which fixes all of those gaps. It was
+    # dead code — nothing in the UI ever called it.
 
     @requires_lock
     def change_extensions(self, path: str, old_ext: str, new_ext: str, dry_run: bool = False, filter_str: str = "", recursive: bool = False):
@@ -328,12 +314,24 @@ class OrganizerAPI:
                 items = [{"action": "move", "src": str(f), "dst": str(f.with_suffix(new_ext))} for f in files]
                 return {"success": True, "message": f"Simulation: {len(files)} files would be converted.", "items": items}
 
+            history = []
+            skipped = []
             for idx, file in enumerate(files):
                 if file_service.is_locked(file):
-                    return {"success": False, "error": f"File '{file.name}' is busy."}
-                file.rename(file.with_suffix(new_ext))
+                    skipped.append(file.name)
+                    self._update_progress(int(((idx + 1) / len(files)) * 100))
+                    continue
+                new_path = file.with_suffix(new_ext)
+                file.rename(new_path)
+                history.append({"action": "move", "src": str(file), "dst": str(new_path)})
                 self._update_progress(int(((idx + 1) / len(files)) * 100))
-            return {"success": True, "message": f"Successfully converted {len(files)} files."}
+
+            self._history = history
+            self._save_history()
+            msg = f"Successfully converted {len(history)} files."
+            if skipped:
+                msg += f" Skipped {len(skipped)} file(s) that were in use."
+            return {"success": True, "message": msg}
         except Exception as e:
             return {"success": False, "error": str(e)}
 
@@ -426,6 +424,7 @@ class OrganizerAPI:
     # Advanced Automation Methods
     # ─────────────────────────────────────────────
 
+    @requires_lock
     @requires_lock
     def delete_empty_folders(self, path: str, dry_run: bool = False):
         """Removes all empty subdirectories recursively."""
@@ -533,6 +532,44 @@ class OrganizerAPI:
         except Exception as e:
             return {"success": False, "error": str(e)}
 
+    def list_subfolders(self, path: str):
+        """Lists the immediate subfolders of `path` with item counts/sizes,
+        for pickers that let the user select several folders to operate on
+        at once (e.g. the Batch Folder Zipper)."""
+        try:
+            if not path or not os.path.isdir(path):
+                return {"success": False, "error": "Invalid path."}
+            folders = file_service.list_top_level_folders(path)
+            return {"success": True, "folders": folders}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    @requires_lock
+    def batch_zip_folders(self, path: str, folder_names: list, target_ext: str = '.zip',
+                           delete_originals: bool = False, dry_run: bool = False):
+        """Zips each of the named top-level subfolders into its own archive
+        (optionally with a custom extension), optionally removing the
+        source folder once it's safely zipped."""
+        try:
+            if is_system_critical_dir(path):
+                return {"success": False, "error": "System-critical directory. Operation blocked."}
+            if not folder_names:
+                return {"success": False, "error": "No folders selected."}
+            history, count, errors = automation_service.batch_zip_folders(
+                path, folder_names, target_ext, delete_originals, dry_run, self._update_progress
+            )
+            if not dry_run:
+                self._history = history
+                self._save_history()
+            msg = f"Simulation: {len(folder_names)} folder(s) would be zipped." if dry_run else f"Zipped {count} item(s) from {len(folder_names)} folder(s)."
+            if errors:
+                msg += f" ({len(errors)} failures. See logs for details.)"
+            resp = {"success": True, "message": msg, "errors": errors}
+            if dry_run: resp["items"] = history
+            return resp
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
     @requires_lock
     def convert_image_formats(self, path: str, source_exts: list, target_ext: str, dry_run: bool = False, recursive: bool = False):
         """Batch converts images to target format using Pillow."""
@@ -627,9 +664,9 @@ class OrganizerAPI:
         try:
             if is_system_critical_dir(file_path):
                 return {"success": False, "error": "System-critical directory. Operation blocked."}
-            dst = media_service.convert_mp3_to_wav(file_path, self._update_progress)
+            dst, err = media_service.convert_mp3_to_wav(file_path, self._update_progress)
             if not dst:
-                return {"success": False, "error": "Conversion failed."}
+                return {"success": False, "error": err or "Conversion failed."}
                 
             self._history = [{"action": "create", "src": file_path, "dst": dst}]
             
@@ -659,9 +696,10 @@ class OrganizerAPI:
 
             results = []
             new_history = []
-            
+            failures = []
+
             for idx, file in enumerate(files):
-                dst = media_service.convert_mp3_to_wav(str(file), self._update_progress)
+                dst, err = media_service.convert_mp3_to_wav(str(file), self._update_progress)
                 if dst:
                     results.append(dst)
                     new_history.append({"action": "create", "src": str(file), "dst": dst})
@@ -672,12 +710,16 @@ class OrganizerAPI:
                             send2trash.send2trash(str(file))
                         except:
                             pass
-                            
+                else:
+                    failures.append(err or file.name)
                 self._update_progress(int(((idx + 1) / len(files)) * 100))
             
             self._history = new_history
             self._save_history()
-            return {"success": True, "message": f"Successfully converted {len(results)} MP3 files to WAV."}
+            msg = f"Successfully converted {len(results)} MP3 files to WAV."
+            if failures:
+                msg += f" {len(failures)} failed."
+            return {"success": True, "message": msg, "errors": failures}
         except Exception as e:
             return {"success": False, "error": str(e)}
 
@@ -687,7 +729,7 @@ class OrganizerAPI:
         try:
             if is_system_critical_dir(file_path):
                 return {"success": False, "error": "System-critical directory. Operation blocked."}
-            dst = media_service.compress_pdf(file_path, self._update_progress)
+            dst, err = media_service.compress_pdf(file_path, self._update_progress)
             if dst:
                 if remove_original:
                     try:
@@ -698,7 +740,7 @@ class OrganizerAPI:
                 self._history = [{"action": "create", "src": file_path, "dst": dst}]
                 self._save_history()
                 return {"success": True, "message": f"Compressed PDF created: {os.path.basename(dst)}", "dst": dst}
-            return {"success": False, "error": "Compression failed"}
+            return {"success": False, "error": err or "Compression failed."}
         except Exception as e:
             return {"success": False, "error": str(e)}
 
@@ -715,9 +757,10 @@ class OrganizerAPI:
 
             results = []
             new_history = []
+            failures = []
             
             for idx, file in enumerate(files):
-                dst = media_service.compress_pdf(str(file), self._update_progress)
+                dst, err = media_service.compress_pdf(str(file), self._update_progress)
                 if dst:
                     results.append(dst)
                     new_history.append({"action": "create", "src": str(file), "dst": dst})
@@ -728,12 +771,16 @@ class OrganizerAPI:
                             send2trash.send2trash(str(file))
                         except:
                             pass
-                            
+                else:
+                    failures.append(err or file.name)
                 self._update_progress(int(((idx + 1) / len(files)) * 100))
             
             self._history = new_history
             self._save_history()
-            return {"success": True, "message": f"Successfully compressed {len(results)} PDF files."}
+            msg = f"Successfully compressed {len(results)} PDF files."
+            if failures:
+                msg += f" {len(failures)} failed."
+            return {"success": True, "message": msg, "errors": failures}
         except Exception as e:
             return {"success": False, "error": str(e)}
 
@@ -743,7 +790,7 @@ class OrganizerAPI:
         try:
             if is_system_critical_dir(file_path):
                 return {"success": False, "error": "System-critical directory. Operation blocked."}
-            dst = media_service.optimize_image(file_path, quality, self._update_progress)
+            dst, err = media_service.optimize_image(file_path, quality, self._update_progress)
             if dst:
                 if remove_original:
                     try:
@@ -754,7 +801,7 @@ class OrganizerAPI:
                 self._history = [{"action": "create", "src": file_path, "dst": dst}]
                 self._save_history()
                 return {"success": True, "message": f"Optimized image created: {os.path.basename(dst)}", "dst": dst}
-            return {"success": False, "error": "Optimization failed"}
+            return {"success": False, "error": err or "Optimization failed."}
         except Exception as e:
             return {"success": False, "error": str(e)}
 
@@ -772,8 +819,9 @@ class OrganizerAPI:
 
             results = []
             new_history = []
+            failures = []
             for idx, file in enumerate(files):
-                dst = media_service.optimize_image(str(file), quality, self._update_progress)
+                dst, err = media_service.optimize_image(str(file), quality, self._update_progress)
                 if dst:
                     results.append(dst)
                     new_history.append({"action": "create", "src": str(file), "dst": dst})
@@ -784,13 +832,16 @@ class OrganizerAPI:
                             send2trash.send2trash(str(file))
                         except:
                             pass
-                            
+                else:
+                    failures.append(err or file.name)
                 self._update_progress(int(((idx + 1) / len(files)) * 100))
             
             self._history = new_history
             self._save_history()
-            
-            return {"success": True, "message": f"Successfully optimized {len(results)} images.", "items": results}
+            msg = f"Successfully optimized {len(results)} images."
+            if failures:
+                msg += f" {len(failures)} failed."
+            return {"success": True, "message": msg, "items": results, "errors": failures}
         except Exception as e:
             return {"success": False, "error": str(e)}
 
@@ -803,8 +854,8 @@ def start_app():
     
     window = webview.create_window(
         'Folders Organizer Pro', url, js_api=api,
-        width=1100, height=850, resizable=True,
-        min_size=(1000, 750), background_color='#0f172a'
+        width=1440, height=920, resizable=True,
+        min_size=(1180, 780), background_color='#F3EEE4'
     )
     api.set_window(window)
     webview.start(debug=False, icon=str(icon_path) if icon_path.exists() else None)

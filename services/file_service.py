@@ -25,6 +25,40 @@ def safe_dest(target_dir: Path, filename: str) -> Path:
         counter += 1
     return dest
 
+def list_top_level_folders(path: str) -> list:
+    """Returns the immediate subfolders of `path` with a quick item count
+    and total size, for UI pickers that let the user select several
+    folders to operate on at once (e.g. batch zipping).
+    """
+    p = Path(path)
+    results = []
+    try:
+        with os.scandir(p) as it:
+            for entry in it:
+                if not entry.is_dir(follow_symlinks=False):
+                    continue
+                item_count = 0
+                total_size = 0
+                try:
+                    for f in Path(entry.path).rglob('*'):
+                        if f.is_file():
+                            item_count += 1
+                            try:
+                                total_size += f.stat().st_size
+                            except OSError:
+                                pass
+                except PermissionError:
+                    pass
+                results.append({
+                    "name": entry.name,
+                    "item_count": item_count,
+                    "size_str": get_size_str(total_size),
+                })
+    except PermissionError:
+        pass
+    results.sort(key=lambda x: x["name"].lower())
+    return results
+
 def is_locked(path: Path) -> bool:
     """Checks if a file or folder is currently locked by another process."""
     try:

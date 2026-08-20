@@ -1,7 +1,8 @@
 # Copyright (c) 2026 mosesrb (Moses Bharshankar). Licensed under GNU GPL-v3.
 """
 automation_service.py
-7 advanced automation operations for Folders Organizer Pro.
+7 advanced automation operations for Folders Organizer Pro, plus batch
+folder zipping.
 All destructive operations support dry_run=True for safe simulation.
 """
 import os
@@ -10,6 +11,10 @@ import shutil
 import datetime
 import zipfile
 import tarfile
+try:
+    import send2trash
+except ImportError:
+    send2trash = None
 try:
     import py7zr
 except ImportError:
@@ -31,38 +36,40 @@ _PROTECTED_NAMES = {'desktop.ini', 'thumbs.db', '.ds_store'}
 # 1. Empty Folder Cleanup
 # ──────────────────────────────────────────────
 def delete_empty_folders(path: str, dry_run: bool, progress_callback) -> tuple:
-    """Recursively finds and removes all empty directories."""
+    """Recursively finds and removes all empty directories, cascading
+    bottom-up so a nested chain of empty folders (A/B/C all empty) fully
+    collapses in a single pass rather than one level per run."""
     p = Path(path)
-    empty_dirs = []
-
-    def _collect(target: Path):
-        for entry in sorted(target.rglob('*'), key=lambda x: len(x.parts), reverse=True):
-            if entry.is_dir() and entry != p:
-                try:
-                    if not any(f for f in entry.iterdir() if f.name != '.organizer_history.json'):
-                        empty_dirs.append(entry)
-                except PermissionError:
-                    pass
-
-    _collect(p)
-
-    if not empty_dirs:
-        return [], 0
-
-    total = len(empty_dirs)
     removed = []
-    for idx, d in enumerate(empty_dirs):
-        if not dry_run:
-            try:
-                d.rmdir()
-                removed.append(str(d))
-            except OSError:
-                pass
-        else:
-            removed.append(str(d))
-        progress_callback(int(((idx + 1) / total) * 100))
 
-    return removed, total
+    def _prune(d: Path) -> bool:
+        """Returns True if `d` is empty (or became empty once its empty
+        children were pruned) and — outside dry_run — was removed."""
+        is_empty = True
+        try:
+            entries = list(d.iterdir())
+        except PermissionError:
+            return False
+        for entry in entries:
+            if entry.name == '.organizer_history.json':
+                continue
+            if entry.is_dir():
+                if not _prune(entry):
+                    is_empty = False
+            else:
+                is_empty = False
+        if is_empty and d != p:
+            if not dry_run:
+                try:
+                    d.rmdir()
+                except OSError:
+                    return False
+            removed.append(str(d))
+        return is_empty
+
+    _prune(p)
+    progress_callback(100)
+    return removed, len(removed)
 
 
 # ──────────────────────────────────────────────
@@ -181,7 +188,15 @@ def _assert_member_is_safe(member_name: str, out_dir: Path) -> Path:
     Rejects absolute paths, '..' traversal, and (on Windows) drive-letter
     or UNC prefixes embedded in the member name.
     """
-    if not member_name or member_name.strip() in ('', '.', '..'):
+    # A bare '.' or empty name just refers to the extraction root itself —
+    # harmless, and produced by very common tools (e.g. Python's tarfile
+    # strips the trailing slash from a directory entry, so the standard
+    # `tar -C dir -cf out.tar .` produces a literal '.' member). The real
+    # containment check below already handles it correctly (resolves to
+    # out_dir, passes) and already independently catches '..' (resolves
+    # outside out_dir, fails relative_to) — so only '..' needs rejecting
+    # here explicitly, as a clear, fast-path safety net.
+    if member_name and member_name.strip() == '..':
         raise ArchiveSecurityError(f"Unsafe archive entry name: {member_name!r}")
 
     # Reject absolute paths / drive letters outright before any join.
@@ -215,7 +230,10 @@ def _safe_extract_tar(tf_path: str, out_dir: Path):
             # Reject symlinks/hardlinks that point outside out_dir too.
             if member.issym() or member.islnk():
                 _assert_member_is_safe(member.linkname, out_dir)
-        archive.extractall(path=str(out_dir))
+        try:
+            archive.extractall(path=str(out_dir), filter='data')
+        except TypeError:
+            archive.extractall(path=str(out_dir))
 
 
 def _safe_extract_7z(zf_path: str, out_dir: Path):
@@ -381,8 +399,19 @@ def additive_backup(src: str, dest: str, dry_run: bool, progress_callback) -> tu
     - Source file is newer than dest file.
     Never deletes from dest.
     """
-    src_p = Path(src)
-    dest_p = Path(dest)
+    src_p = Path(src).resolve()
+    dest_p = Path(dest).resolve()
+
+    # If dest lives inside src, re-running this (an "additive"/incremental
+    # operation meant to be repeated) copies each prior run's own output
+    # back into itself, nesting one level deeper every time with no
+    # stopping point — e.g. a 'backup' folder created inside the project
+    # it's backing up turns into backup/backup/backup/... forever.
+    if dest_p == src_p or dest_p in src_p.parents or src_p in dest_p.parents:
+        raise ValueError(
+            "The backup destination can't be inside (or the same as) the source folder — "
+            "that would make every future backup copy itself into itself. Choose a destination outside the source."
+        )
 
     candidates = []
     for f in src_p.rglob('*'):
@@ -417,7 +446,92 @@ def additive_backup(src: str, dest: str, dry_run: bool, progress_callback) -> tu
 
 
 # ──────────────────────────────────────────────
-# 7. Image Format Converter
+# 8. Batch Folder Zipper
+# ──────────────────────────────────────────────
+def batch_zip_folders(path: str, folder_names: list, target_ext: str, delete_originals: bool,
+                       dry_run: bool, progress_callback) -> tuple:
+    """
+    Zips each named top-level subfolder of `path` into its own archive,
+    written back into `path` alongside the other folders. `target_ext`
+    lets the archive come out with something other than a plain '.zip'
+    extension (e.g. '.cbz' for a folder of comic pages, '.bak' for a
+    disguised backup) — the archive is always standard zip format
+    internally, only the file extension changes, which is what most tools
+    that expect a specific extension actually care about. This folds
+    "zip a folder" and "give it a different extension" into one operation
+    instead of two.
+
+    Each archive contains the source folder as its own root entry (e.g.
+    zipping 'Photos' produces 'Photos.zip' containing 'Photos/img1.jpg'),
+    so re-extracting it reproduces the original folder structure exactly.
+
+    Skips a folder if an item with the resulting archive name already
+    exists, reporting it as an error rather than overwriting silently.
+    delete_originals=True sends the source folder to the Recycle Bin after
+    a *successful* zip — never in dry_run, and never if the zip step failed
+    for that folder. The archive itself is undo-able via the app's normal
+    history/undo; the Recycle Bin is what makes the deletion recoverable
+    (the app's undo history doesn't reverse folder deletions).
+    """
+    p = Path(path)
+    if not target_ext.startswith('.'):
+        target_ext = '.' + target_ext
+
+    targets = []
+    for name in folder_names:
+        folder = p / name
+        if folder.is_dir():
+            targets.append(folder)
+
+    if not targets:
+        return [], 0, []
+
+    total = len(targets)
+    history = []
+    errors = []
+
+    for idx, folder in enumerate(targets):
+        archive_path = folder.parent / f"{folder.name}{target_ext}"
+
+        if archive_path.exists():
+            errors.append(f"{folder.name}: an item named '{archive_path.name}' already exists — skipped.")
+            progress_callback(int(((idx + 1) / total) * 100))
+            continue
+
+        if not dry_run:
+            tmp_zip = folder.parent / f".{folder.name}.zipping.tmp"
+            try:
+                with zipfile.ZipFile(tmp_zip, 'w', zipfile.ZIP_DEFLATED) as zf:
+                    for file in folder.rglob('*'):
+                        if file.is_file() and file.name != '.organizer_history.json':
+                            zf.write(file, file.relative_to(folder.parent))
+                tmp_zip.replace(archive_path)
+                history.append({"action": "create", "src": str(folder), "dst": str(archive_path)})
+                if delete_originals:
+                    if send2trash:
+                        send2trash.send2trash(str(folder))
+                    else:
+                        shutil.rmtree(folder)
+                    history.append({"action": "delete", "src": str(folder), "dst": ""})
+            except Exception as e:
+                errors.append(f"{folder.name}: {e}")
+                if tmp_zip.exists():
+                    try:
+                        tmp_zip.unlink()
+                    except OSError:
+                        pass
+        else:
+            history.append({"action": "create", "src": str(folder), "dst": str(archive_path)})
+            if delete_originals:
+                history.append({"action": "delete", "src": str(folder), "dst": ""})
+
+        progress_callback(int(((idx + 1) / total) * 100))
+
+    return history, len(history), errors
+
+
+# ──────────────────────────────────────────────
+# 9. Image Format Converter
 # ──────────────────────────────────────────────
 def convert_image_formats(path: str, source_exts: list, target_ext: str, dry_run: bool, progress_callback, recursive: bool = False) -> tuple:
     """

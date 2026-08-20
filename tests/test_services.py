@@ -28,11 +28,57 @@ class TestOrganizerServices(unittest.TestCase):
                          (self.test_dir / "file2.txt").stat().st_size +
                          (self.test_dir / "subdir" / "nested.txt").stat().st_size)
 
+    def test_delete_empty_folders_cascades_nested_chain_in_one_pass(self):
+        """A/B/C all empty must fully collapse in a single run, not require
+        one run per nesting level."""
+        (self.test_dir / "A" / "B" / "C").mkdir(parents=True)
+        removed, total = automation_service.delete_empty_folders(str(self.test_dir), False, lambda x: None)
+        self.assertFalse((self.test_dir / "A").exists())
+        self.assertEqual(total, 3)
+        # Non-empty subdir from setUp must survive untouched.
+        self.assertTrue((self.test_dir / "subdir" / "nested.txt").exists())
+
     def test_flatten_workspace(self):
         history, count = organizer_service.flatten_workspace(str(self.test_dir), False, lambda x: None)
         self.assertEqual(count, 1) # only nested.txt should be moved
         self.assertTrue((self.test_dir / "nested.txt").exists())
         self.assertFalse((self.test_dir / "subdir").exists())
+
+    def test_custom_rule_keyword_overrides_builtin(self):
+        """A custom rule using a keyword that a built-in category also uses
+        (e.g. 'invoice', which the built-in 'Work' category claims) must win
+        — otherwise a user's custom rule silently does nothing whenever it
+        overlaps a default."""
+        (self.test_dir / "invoice_2024.pdf").write_text("x")
+        history, count = organizer_service.smart_categorize(
+            str(self.test_dir), False,
+            [{"folder": "Client Docs", "extensions": [], "keywords": ["invoice"]}],
+            lambda x: None
+        )
+        self.assertTrue((self.test_dir / "Client Docs" / "invoice_2024.pdf").exists())
+        self.assertFalse((self.test_dir / "Work").exists())
+
+    def test_regex_rename_empty_replacement_strips_match(self):
+        """Empty replacement is a valid regex substitution ('delete this
+        match'). It must not be silently reinterpreted as 'regex mode is
+        off' just because the string is falsy."""
+        (self.test_dir / "IMG_1234_raw.jpg").write_text("x")
+        history, count = organizer_service.sequential_rename(
+            str(self.test_dir), prefix="", mode="files", sort_mode="name",
+            dry_run=True, filter_str="_raw", use_regex=True, progress_callback=lambda x: None
+        )
+        dsts = [h["dst"] for h in history]
+        self.assertTrue(any(d.endswith("IMG_1234.jpg") for d in dsts))
+
+    def test_regex_rename_without_pattern_raises_clear_error(self):
+        """Regex Mode with an empty search pattern must not silently run —
+        re.sub('', ...) matches between every character and mangles names."""
+        (self.test_dir / "photo1.jpg").write_text("x")
+        with self.assertRaises(ValueError):
+            organizer_service.sequential_rename(
+                str(self.test_dir), prefix="X", mode="files", sort_mode="name",
+                dry_run=True, filter_str="", use_regex=True, progress_callback=lambda x: None
+            )
 
     def test_sequential_rename(self):
         history, count = organizer_service.sequential_rename(str(self.test_dir), "new_", "files", "name", False, "", False, lambda x: None)
@@ -192,6 +238,39 @@ class TestArchiveExtractionSafety(unittest.TestCase):
         with self.assertRaises(automation_service.ArchiveSecurityError):
             automation_service._assert_member_is_safe(r"C:\Windows\evil.dll", self.out_dir)
 
+    def test_allows_root_directory_entries(self):
+        """A bare '.' entry just means 'the extraction root itself' and is
+        harmless — Python's tarfile strips the trailing slash from a
+        directory entry, so the extremely standard `tar -C dir -cf out.tar .`
+        produces a literal '.' member. This must not reject the whole
+        archive (previously it did)."""
+        for name in ('.', '', './'):
+            target = automation_service._assert_member_is_safe(name, self.out_dir)
+            self.assertEqual(target.resolve(), self.out_dir.resolve())
+
+    def test_still_rejects_bare_parent_traversal(self):
+        with self.assertRaises(automation_service.ArchiveSecurityError):
+            automation_service._assert_member_is_safe("..", self.out_dir)
+
+    def test_extracts_real_standard_tar_with_root_entry(self):
+        """End-to-end: a tar built the standard way (tar -C dir -cf out.tar .)
+        includes a '.' root entry and must extract successfully."""
+        import tarfile
+        staging = Path("test_tar_staging")
+        staging.mkdir(exist_ok=True)
+        try:
+            (staging / "doc.txt").write_text("hello")
+            tar_path = Path("standard_style.tar")
+            with tarfile.open(tar_path, "w") as tf:
+                tf.add(str(staging), arcname=".")
+            try:
+                automation_service._safe_extract_tar(str(tar_path), self.out_dir)
+                self.assertTrue((self.out_dir / "doc.txt").exists())
+            finally:
+                tar_path.unlink(missing_ok=True)
+        finally:
+            shutil.rmtree(staging, ignore_errors=True)
+
 
 class TestRecursiveToggle(unittest.TestCase):
     """Regression tests for the new 'include subfolders' option — previously
@@ -235,6 +314,78 @@ class TestRecursiveToggle(unittest.TestCase):
             str(self.test_dir), 0.0000001, True, lambda x: None
         )
         self.assertEqual(count, 1)
+
+
+class TestBatchZipFolders(unittest.TestCase):
+    """Tests for the new Batch Folder Zipper (zip N folders at once,
+    optionally with a custom extension, optionally deleting the source)."""
+
+    def setUp(self):
+        self.test_dir = Path("test_batchzip_workspace")
+        self.test_dir.mkdir(exist_ok=True)
+        for name, files in [("Comics", ["p1.jpg", "p2.jpg"]), ("Notes", ["a.txt"])]:
+            folder = self.test_dir / name
+            folder.mkdir()
+            for f in files:
+                (folder / f).write_text("x")
+
+    def tearDown(self):
+        if self.test_dir.exists():
+            shutil.rmtree(self.test_dir)
+
+    def test_additive_backup_rejects_dest_inside_src(self):
+        """Destination inside source would nest a fresh copy of itself into
+        itself on every re-run (verified live: 3 runs produced
+        backup/backup/backup/... with no convergence) — must be blocked
+        up front instead of silently ballooning disk usage."""
+        src = self.test_dir / "project"
+        src.mkdir()
+        (src / "a.txt").write_text("x")
+        dest = src / "backup"
+        with self.assertRaises(ValueError):
+            automation_service.additive_backup(str(src), str(dest), False, lambda x: None)
+        # Legitimate sibling destination must still work.
+        sibling_dest = self.test_dir / "external_backup"
+        history, count = automation_service.additive_backup(str(src), str(sibling_dest), False, lambda x: None)
+        self.assertEqual(count, 1)
+
+    def test_zips_each_selected_folder_with_custom_extension(self):
+        history, count, errors = automation_service.batch_zip_folders(
+            str(self.test_dir), ["Comics", "Notes"], ".cbz", False, False, lambda x: None
+        )
+        self.assertEqual(errors, [])
+        self.assertTrue((self.test_dir / "Comics.cbz").exists())
+        self.assertTrue((self.test_dir / "Notes.cbz").exists())
+        # Original folders survive when delete_originals is False.
+        self.assertTrue((self.test_dir / "Comics").exists())
+        with zipfile.ZipFile(self.test_dir / "Comics.cbz") as zf:
+            names = zf.namelist()
+        self.assertTrue(any(n.startswith("Comics/") for n in names))
+
+    def test_dry_run_touches_nothing(self):
+        history, count, errors = automation_service.batch_zip_folders(
+            str(self.test_dir), ["Comics"], ".zip", True, True, lambda x: None
+        )
+        self.assertFalse((self.test_dir / "Comics.zip").exists())
+        self.assertTrue((self.test_dir / "Comics").exists())
+        self.assertEqual(len(history), 2)  # create + delete entries, simulated
+
+    def test_delete_originals_removes_source_after_success(self):
+        automation_service.batch_zip_folders(
+            str(self.test_dir), ["Notes"], ".zip", True, False, lambda x: None
+        )
+        self.assertTrue((self.test_dir / "Notes.zip").exists())
+        self.assertFalse((self.test_dir / "Notes").exists())
+
+    def test_skips_when_archive_name_collides(self):
+        (self.test_dir / "Comics.zip").write_text("existing file")
+        history, count, errors = automation_service.batch_zip_folders(
+            str(self.test_dir), ["Comics"], ".zip", False, False, lambda x: None
+        )
+        self.assertEqual(len(errors), 1)
+        self.assertIn("already exists", errors[0])
+        # The pre-existing file must not have been overwritten.
+        self.assertEqual((self.test_dir / "Comics.zip").read_text(), "existing file")
 
 
 if __name__ == '__main__':

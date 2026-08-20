@@ -16,6 +16,9 @@ def sequential_rename(path: str, prefix: str, mode: str, sort_mode: str, dry_run
     else:
         items = [f for f in p.iterdir() if f.is_dir()]
 
+    if use_regex and not filter_str:
+        raise ValueError("Regex Mode needs a search pattern — enter one in the Live Filter field.")
+
     if filter_str:
         if use_regex:
             regex = re.compile(filter_str, re.IGNORECASE)
@@ -37,7 +40,7 @@ def sequential_rename(path: str, prefix: str, mode: str, sort_mode: str, dry_run
 
     for idx, item in enumerate(items):
         ext = item.suffix if mode == "files" else ""
-        if use_regex and prefix:
+        if use_regex:
             new_name = re.sub(filter_str, prefix, item.name, flags=re.IGNORECASE)
         else:
             new_name = f"{prefix}{str(idx + 1).zfill(padding)}{ext}"
@@ -168,24 +171,37 @@ def smart_categorize(path: str, dry_run: bool, custom_rules: list, progress_call
         'Personal': ['id', 'passport', 'medical', 'tax', 'legal', 'photo', 'home']
     }
 
+    custom_category_map = {}
+    custom_keywords = {}
     if custom_rules:
         for rule in custom_rules:
             folder = rule.get('folder', '').strip()
             if not folder: continue
             rule_exts = [e.strip().lower() if e.strip().startswith('.') else f'.{e.strip().lower()}' for e in rule.get('extensions', []) if e.strip()]
             rule_keys = [k.strip().lower() for k in rule.get('keywords', []) if k.strip()]
-            if rule_exts: category_map[folder] = rule_exts
-            if rule_keys: keywords[folder] = rule_keys
+            if rule_exts: custom_category_map[folder] = rule_exts
+            if rule_keys: custom_keywords[folder] = rule_keys
 
     files = [f for f in p.iterdir() if f.is_file() and f.name != '.organizer_history.json']
     if not files: return [], 0
 
     def _target_category(file):
         name_lower = file.name.lower()
+        ext = file.suffix.lower()
+        # Custom rules represent explicit user intent, so they're checked
+        # first — a user's own keyword/extension rule always wins over a
+        # built-in default, even if they happen to overlap (e.g. a custom
+        # rule using 'invoice', which the built-in 'Work' category also
+        # uses).
+        for cat, keys in custom_keywords.items():
+            if any(k in name_lower for k in keys):
+                return cat
+        for cat, exts in custom_category_map.items():
+            if ext in exts:
+                return cat
         for cat, keys in keywords.items():
             if any(k in name_lower for k in keys):
                 return cat
-        ext = file.suffix.lower()
         for cat, exts in category_map.items():
             if ext in exts:
                 return cat

@@ -36,7 +36,27 @@ import {
   RotateCcw,
   FileText,
   ExternalLink,
+  FolderArchive,
+  Sun,
+  Moon,
 } from 'lucide-react';
+
+// App identity mark — a manila folder with a stamped checkmark, matching
+// branding/logo-mark.svg exactly. Kept as its own fixed brand colors
+// (cream folder, stamp-red circle) rather than currentColor/theme tokens,
+// the same way most app logos stay visually consistent across light/dark
+// themes rather than re-theming.
+const LogoMark = ({ className }) => (
+  <svg viewBox="0 0 512 512" className={className} xmlns="http://www.w3.org/2000/svg">
+    <path d="M 106 168 Q 106 152 122 152 L 224 152 Q 234 152 240 160 L 258 184 L 388 184 Q 404 184 404 200 L 404 210 L 106 210 Z" fill="#E4D9C4"/>
+    <rect x="96" y="196" width="320" height="184" rx="18" fill="#FBF8F1"/>
+    <line x1="96" y1="196" x2="416" y2="196" stroke="#E4D9C4" strokeWidth="4"/>
+    <g transform="rotate(-14 360 328)">
+      <circle cx="360" cy="328" r="74" fill="#8A2E2E" stroke="#FBF8F1" strokeWidth="7"/>
+      <path d="M 322 330 L 348 356 L 400 300" fill="none" stroke="#FBF8F1" strokeWidth="15" strokeLinecap="round" strokeLinejoin="round"/>
+    </g>
+  </svg>
+);
 
 const App = () => {
   // — Core state —
@@ -46,6 +66,11 @@ const App = () => {
   const [newExt, setNewExt] = useState('.cbr');
   const [sortMode, setSortMode] = useState('name');
   const [isDryRun, setIsDryRun] = useState(false);
+  const [theme, setTheme] = useState(() => {
+    const saved = localStorage.getItem('organizer-theme');
+    if (saved === 'light' || saved === 'dark') return saved;
+    return window.matchMedia?.('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+  });
   const [recursiveMode, setRecursiveMode] = useState(false); // "include subfolders" — applies to ops that support it (see RECURSIVE_CAPABLE_OPS)
   const [filterText, setFilterText] = useState('');
   const [status, setStatus] = useState({ type: '', message: '' });
@@ -93,6 +118,10 @@ const App = () => {
   const [backupDest, setBackupDest] = useState('');
   const [imgSourceExts, setImgSourceExts] = useState('.png,.bmp');
   const [imgTargetExt, setImgTargetExt] = useState('.webp');
+  const [zipFolders, setZipFolders] = useState([]); // [{name, item_count, size_str}]
+  const [zipSelected, setZipSelected] = useState([]); // folder names checked
+  const [zipTargetExt, setZipTargetExt] = useState('.zip');
+  const [zipDeleteOriginals, setZipDeleteOriginals] = useState(false);
 
   // — Progress listener —
   useEffect(() => {
@@ -101,12 +130,21 @@ const App = () => {
     return () => window.removeEventListener('progressUpdate', handleProgress);
   }, []);
 
+  // — Theme —
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', theme);
+    localStorage.setItem('organizer-theme', theme);
+  }, [theme]);
+
+  const toggleTheme = () => setTheme((t) => (t === 'dark' ? 'light' : 'dark'));
+
   // — Auto-load stats + rules when path changes —
   useEffect(() => {
     if (path) {
       refreshStats();
       loadRules();
       refreshMediaFiles();
+      loadZipFolders();
     }
   }, [path]);
 
@@ -118,6 +156,19 @@ const App = () => {
     if (!path || !window.pywebview?.api) return;
     const res = await window.pywebview.api.analyze_workspace(path);
     if (res.success) setStats(res.stats);
+  };
+
+  const loadZipFolders = async () => {
+    if (!path || !window.pywebview?.api) return;
+    const res = await window.pywebview.api.list_subfolders(path);
+    if (res.success) {
+      setZipFolders(res.folders);
+      setZipSelected((prev) => prev.filter((n) => res.folders.some((f) => f.name === n)));
+    }
+  };
+
+  const toggleZipSelected = (name) => {
+    setZipSelected((prev) => prev.includes(name) ? prev.filter((n) => n !== name) : [...prev, name]);
   };
 
   const loadRules = async () => {
@@ -338,6 +389,7 @@ const App = () => {
   const UNDOABLE_OPS = [
     'sequential_rename', 'sort_by_date', 'flatten_workspace', 'smart_categorize',
     'advanced_regex_rename', 'cleanup_old_files', 'archive_large_files', 'convert_image_formats',
+    'batch_zip_folders', 'change_extensions',
   ];
 
   // Operations that permanently change/delete files on disk and are NOT
@@ -347,6 +399,7 @@ const App = () => {
   const DESTRUCTIVE_OPS = [
     'delete_duplicates', 'cleanup_old_files', 'advanced_regex_rename',
     'flatten_workspace', 'archive_large_files', 'change_extensions', 'batch_unzip',
+    'batch_zip_folders',
   ];
 
   const opTitleFor = (opName) => opName
@@ -406,6 +459,7 @@ const App = () => {
           if (opName === 'find_duplicates') setDuplicates(result.duplicates || []);
           if (opName === 'delete_duplicates') setDuplicates([]);
           refreshStats();
+          if (opName === 'batch_zip_folders') loadZipFolders();
         } else {
           showStatus('error', result.error);
         }
@@ -508,13 +562,13 @@ const App = () => {
     switch (activeView) {
       case 'dashboard':
         return (
-          <div className="grid grid-cols-2 gap-6 p-8 overflow-y-auto custom-scrollbar">
+          <div className="absolute inset-0 overflow-y-auto custom-scrollbar grid grid-cols-2 gap-6 p-8">
             <div className="col-span-2 glass-card border-primary/20 bg-primary/5">
-              <h2 className="text-xl font-bold flex items-center gap-3 mb-4 text-primary">
+              <h2 className="text-xl font-bold flex items-center gap-3 mb-3 text-primary">
                 <FolderOpen className="w-6 h-6" /> Workspace Status
               </h2>
               <div className="flex gap-4 items-center">
-                <div className="flex-1 bg-secondary/70 border border-slate-700/50 rounded-xl px-4 py-3 text-slate-400 font-mono text-xs truncate">
+                <div className="flex-1 bg-secondary/70 border border-slate-300 rounded-xl px-4 py-2.5 text-ink font-mono text-xs truncate">
                   {path || 'Connect a directory to begin...'}
                 </div>
                 <button onClick={handleSelectFolder} className="btn-primary flex items-center gap-2 whitespace-nowrap">
@@ -527,15 +581,15 @@ const App = () => {
               <>
                 <div className="glass-card flex flex-col gap-2">
                   <span className="text-[10px] uppercase tracking-widest text-slate-500 font-bold">Total Size</span>
-                  <div className="text-3xl font-bold text-slate-100">{stats.total_size_str}</div>
-                  <div className="text-[10px] text-slate-400">Current active directory volume</div>
+                  <div className="text-3xl font-bold text-ink">{stats.total_size_str}</div>
+                  <div className="text-[10px] text-slate-600">Current active directory volume</div>
                 </div>
                 <div className="glass-card flex flex-col gap-2">
                   <span className="text-[10px] uppercase tracking-widest text-slate-500 font-bold">Categories</span>
                   <div className="flex flex-wrap gap-2 mt-1">
                     {Object.entries(stats.categories).map(([cat, size]) => (
-                      <div key={cat} className="px-2 py-1 bg-slate-800 rounded-lg text-[10px] border border-slate-200">
-                        <span className="text-slate-400">{cat}:</span> <span className="text-primary font-bold">{Math.round(size / 1024 / 1024)}MB</span>
+                      <div key={cat} className="px-2 py-1 bg-secondary/60 rounded-lg text-[10px] border border-slate-300">
+                        <span className="text-ink-soft">{cat}:</span> <span className="text-primary font-bold">{Math.round(size / 1024 / 1024)}MB</span>
                       </div>
                     ))}
                   </div>
@@ -548,7 +602,7 @@ const App = () => {
                  <Hash className="w-8 h-8 text-accent" />
                  <span className="font-bold text-sm">Renamer</span>
                </button>
-               <button onClick={() => setActiveView('media')} className="p-6 glass-card border-music/20 hover:bg-music/5 flex flex-col items-center gap-3 text-center">
+               <button onClick={() => setActiveView('media')} className="p-6 glass-card border-pink-500/20 hover:bg-pink-500/5 flex flex-col items-center gap-3 text-center">
                  <Music className="w-8 h-8 text-pink-400" />
                  <span className="font-bold text-sm">Media Tools</span>
                </button>
@@ -562,22 +616,22 @@ const App = () => {
 
       case 'smart':
         return (
-          <div className="p-8 max-w-2xl mx-auto space-y-8">
+          <div className="absolute inset-0 overflow-y-auto custom-scrollbar p-8 max-w-2xl mx-auto space-y-8">
             <div className="glass-card border-indigo-500/20 bg-indigo-500/5">
               <h2 className="text-2xl font-bold flex items-center gap-3 mb-6">
                 <Wand2 className="w-8 h-8 text-indigo-400" /> Smart Categorizer
               </h2>
               <div className="space-y-6">
-                <p className="text-sm text-slate-400 leading-relaxed">
+                <p className="text-sm text-ink-soft leading-relaxed">
                   Automatically sort files into folders based on their extensions and keywords using the rules defined in the 
                   <button onClick={() => setActiveView('rules')} className="text-indigo-400 font-bold hover:underline mx-1">Rules Editor</button>.
                 </p>
                 
-                <div className="p-4 bg-secondary/70 border border-slate-700/50 rounded-xl space-y-3">
+                <div className="p-4 bg-secondary/70 border border-slate-300 rounded-xl space-y-3">
                    <div className="text-[10px] font-black uppercase tracking-widest text-slate-500">Active Rules: {customRules.length}</div>
                    <div className="flex flex-wrap gap-2">
                       {customRules.slice(0, 5).map((r, i) => (
-                        <span key={i} className="px-2 py-1 bg-indigo-500/10 border border-indigo-500/20 text-indigo-300 text-[10px] rounded-lg">/{r.folder}</span>
+                        <span key={i} className="px-2 py-1 bg-indigo-500/10 border border-indigo-500/20 text-indigo-700 text-[10px] rounded-lg">/{r.folder}</span>
                       ))}
                       {customRules.length > 5 && <span className="text-[10px] text-slate-600">+{customRules.length - 5} more</span>}
                    </div>
@@ -593,13 +647,13 @@ const App = () => {
 
       case 'date':
         return (
-          <div className="p-8 max-w-2xl mx-auto space-y-8">
+          <div className="absolute inset-0 overflow-y-auto custom-scrollbar p-8 max-w-2xl mx-auto space-y-8">
             <div className="glass-card border-orange-500/20 bg-orange-500/5">
               <h2 className="text-2xl font-bold flex items-center gap-3 mb-6">
                 <CalendarClock className="w-8 h-8 text-orange-400" /> Date-Based Organizer
               </h2>
               <div className="space-y-8">
-                <p className="text-sm text-slate-400 leading-relaxed">
+                <p className="text-sm text-ink-soft leading-relaxed">
                   Organize your files into a chronological folder structure based on their last modification date.
                 </p>
 
@@ -610,7 +664,7 @@ const App = () => {
                       <button 
                         key={grain}
                         onClick={() => setDateGrain(grain)}
-                        className={`py-3 rounded-xl border text-xs font-bold uppercase transition-all ${dateGrain === grain ? 'bg-orange-500/20 border-orange-500/50 text-orange-400 shadow-lg shadow-orange-500/10' : 'bg-slate-900 border-slate-200 text-slate-500 hover:bg-slate-800'}`}
+                        className={`py-3 rounded-xl border text-xs font-bold uppercase transition-all ${dateGrain === grain ? 'bg-orange-500/20 border-orange-500/50 text-orange-600' : 'bg-secondary/40 border-slate-300 text-slate-600 hover:bg-secondary'}`}
                       >
                         {grain}
                       </button>
@@ -628,12 +682,12 @@ const App = () => {
 
       case 'duplicates':
         return (
-          <div className="p-8 max-w-3xl mx-auto space-y-6">
+          <div className="absolute inset-0 overflow-y-auto custom-scrollbar p-8 max-w-3xl mx-auto space-y-6">
             <div className="glass-card border-pink-500/20 bg-pink-500/5">
               <h2 className="text-2xl font-bold flex items-center gap-3 mb-4">
                 <Copy className="w-8 h-8 text-pink-400" /> Duplicate Finder
               </h2>
-              <p className="text-sm text-slate-400 leading-relaxed mb-6">
+              <p className="text-sm text-ink-soft leading-relaxed mb-6">
                 Scans recursively and compares files by content (size → 1KB header hash → full hash), not just filename.
               </p>
 
@@ -651,7 +705,7 @@ const App = () => {
                       key={opt.id}
                       aria-pressed={keepBy === opt.id}
                       onClick={() => setKeepBy(opt.id)}
-                      className={`py-3 rounded-xl border text-xs font-bold uppercase transition-all ${keepBy === opt.id ? 'bg-pink-500/20 border-pink-500/50 text-pink-400 shadow-lg shadow-pink-500/10' : 'bg-slate-900 border-slate-200 text-slate-500 hover:bg-slate-800'}`}
+                      className={`py-3 rounded-xl border text-xs font-bold uppercase transition-all ${keepBy === opt.id ? 'bg-pink-500/20 border-pink-500/50 text-pink-700' : 'bg-secondary/40 border-slate-300 text-slate-600 hover:bg-secondary'}`}
                     >
                       {opt.label}
                     </button>
@@ -671,7 +725,7 @@ const App = () => {
             {duplicates.length > 0 && (
               <div className="glass-card">
                 <div className="flex items-center justify-between mb-4">
-                  <h3 className="text-sm font-bold text-slate-300">
+                  <h3 className="text-sm font-bold text-ink">
                     {duplicates.length} duplicate group{duplicates.length !== 1 ? 's' : ''} found
                   </h3>
                   <button
@@ -703,24 +757,24 @@ const App = () => {
 
       case 'renamer':
         return (
-          <div className="p-8 max-w-2xl mx-auto space-y-8 overflow-y-auto">
+          <div className="absolute inset-0 overflow-y-auto custom-scrollbar p-8 max-w-2xl mx-auto space-y-8">
             <div className="glass-card">
               <h2 className="text-2xl font-bold flex items-center gap-3 mb-6">
                 <Hash className="w-8 h-8 text-accent" /> Sequential Renamer
               </h2>
               <div className="space-y-6">
                 <div className="flex items-center justify-between">
-                  <span className="text-sm font-medium text-slate-400">Sorting Priority</span>
-                  <div className="flex bg-slate-900 rounded-xl p-1 border border-slate-200">
-                    <button onClick={() => setSortMode('name')} className={`px-4 py-1.5 text-xs font-bold rounded-lg transition-all ${sortMode === 'name' ? 'bg-primary shadow-lg' : 'text-slate-600'}`}>NAME</button>
-                    <button onClick={() => setSortMode('date')} className={`px-4 py-1.5 text-xs font-bold rounded-lg transition-all ${sortMode === 'date' ? 'bg-primary shadow-lg' : 'text-slate-600'}`}>DATE</button>
+                  <span className="text-sm font-medium text-ink-soft">Sorting Priority</span>
+                  <div className="flex bg-secondary/50 rounded-xl p-1 border border-slate-300">
+                    <button onClick={() => setSortMode('name')} className={`px-4 py-1.5 text-xs font-bold rounded-lg transition-all ${sortMode === 'name' ? 'bg-primary text-on-primary' : 'text-slate-600'}`}>NAME</button>
+                    <button onClick={() => setSortMode('date')} className={`px-4 py-1.5 text-xs font-bold rounded-lg transition-all ${sortMode === 'date' ? 'bg-primary text-on-primary' : 'text-slate-600'}`}>DATE</button>
                   </div>
                 </div>
                 
                 <div className="space-y-2">
                   <div className="flex justify-between items-center px-1">
                     <label className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Naming Pattern</label>
-                    <button onClick={() => setUseRegex(!useRegex)} className={`px-2 py-0.5 text-[9px] font-bold rounded border ${useRegex ? 'bg-indigo-500/20 border-indigo-500/40 text-indigo-400' : 'bg-slate-800 border-slate-200 text-slate-600'}`}>REGEX MODE</button>
+                    <button onClick={() => setUseRegex(!useRegex)} className={`px-2 py-0.5 text-[9px] font-bold rounded border ${useRegex ? 'bg-indigo-500/20 border-indigo-500/40 text-indigo-700' : 'bg-secondary/50 border-slate-300 text-slate-600'}`}>REGEX MODE</button>
                   </div>
                   <input type="text" value={prefix} onChange={(e) => setPrefix(e.target.value)} className="glass-input w-full" placeholder="Enter prefix (e.g. Photo_)" />
                 </div>
@@ -744,7 +798,7 @@ const App = () => {
 
       case 'extensions':
         return (
-          <div className="p-8 max-w-2xl mx-auto space-y-8">
+          <div className="absolute inset-0 overflow-y-auto custom-scrollbar p-8 max-w-2xl mx-auto space-y-8">
             <div className="glass-card border-cyan-500/20">
               <h2 className="text-2xl font-bold flex items-center gap-3 mb-6">
                 <Scissors className="w-8 h-8 text-cyan-400" /> Extension Changer
@@ -762,7 +816,7 @@ const App = () => {
                   </div>
                 </div>
                 <button onClick={() => runOperation('change_extensions')} className="w-full btn-primary !bg-cyan-700 hover:!bg-cyan-600 py-4 text-lg font-bold">Apply Mass Extension Change</button>
-                <label className="flex items-center justify-center gap-2 text-xs text-cyan-300 cursor-pointer">
+                <label className="flex items-center justify-center gap-2 text-xs text-cyan-700 cursor-pointer">
                   <input
                     type="checkbox"
                     checked={recursiveMode}
@@ -779,12 +833,12 @@ const App = () => {
 
       case 'media':
         return (
-          <div className="p-8 grid grid-cols-2 gap-6 overflow-y-auto custom-scrollbar">
+          <div className="absolute inset-0 overflow-y-auto custom-scrollbar p-8 grid grid-cols-2 gap-6">
             <div className="col-span-2 mb-2">
               <h2 className="text-2xl font-bold flex items-center gap-3">
                 <Music className="w-8 h-8 text-pink-400" /> Media Processing Hub
               </h2>
-              <p className="text-slate-400 mt-1">Professional optimization tools for audio, documents, and imagery.</p>
+              <p className="text-ink-soft mt-1">Professional optimization tools for audio, documents, and imagery.</p>
             </div>
 
             <div className="col-span-2 glass-card border-pink-500/20 bg-pink-500/5 flex flex-col gap-4">
@@ -794,7 +848,7 @@ const App = () => {
                     <Music className="w-5 h-5 text-pink-400" />
                   </div>
                   <div>
-                    <h3 className="font-bold text-white">MP3 to WAV Converter</h3>
+                    <h3 className="font-bold text-ink">MP3 to WAV Converter</h3>
                     <p className="text-xs text-slate-500">Convert audio files losslessly. {audioFiles.length} file(s) found.</p>
                   </div>
                 </div>
@@ -802,7 +856,7 @@ const App = () => {
                   <button onClick={refreshMediaFiles} className="btn-ghost py-2 px-4 flex items-center justify-center gap-2 text-xs shrink-0 border border-slate-700">
                     <RotateCcw className="w-4 h-4" /> Refresh
                   </button>
-                  <label className="flex items-center gap-2 text-xs text-pink-300 cursor-pointer">
+                  <label className="flex items-center gap-2 text-xs text-pink-700 cursor-pointer">
                     <input 
                       type="checkbox" 
                       checked={removeOriginalMp3} 
@@ -829,7 +883,7 @@ const App = () => {
                     <div key={idx} className="flex justify-between items-center p-3 bg-secondary/70 rounded-xl border border-slate-200 hover:border-pink-500/20 transition-all">
                       <div className="flex items-center gap-3 overflow-hidden">
                         <Music className="w-4 h-4 text-pink-400 shrink-0" />
-                        <span className="text-xs truncate text-slate-300" title={file.name}>{file.name}</span>
+                        <span className="text-xs truncate text-ink-soft" title={file.name}>{file.name}</span>
                         <span className="text-[10px] text-slate-500 shrink-0 bg-secondary/70 px-2 py-0.5 rounded">{file.size}</span>
                       </div>
                       <div className="flex items-center gap-2">
@@ -857,7 +911,7 @@ const App = () => {
                     <FileJson className="w-5 h-5 text-red-400" />
                   </div>
                   <div>
-                    <h3 className="font-bold text-white">PDF Compressor</h3>
+                    <h3 className="font-bold text-ink">PDF Compressor</h3>
                     <p className="text-xs text-slate-500">Reduce PDF file size. {pdfFiles.length} file(s) found.</p>
                   </div>
                 </div>
@@ -865,7 +919,7 @@ const App = () => {
                   <button onClick={refreshMediaFiles} className="btn-ghost py-2 px-4 flex items-center justify-center gap-2 text-xs shrink-0 border border-slate-700">
                     <RotateCcw className="w-4 h-4" /> Refresh
                   </button>
-                  <label className="flex items-center gap-2 text-xs text-red-300 cursor-pointer">
+                  <label className="flex items-center gap-2 text-xs text-red-600 cursor-pointer">
                     <input 
                       type="checkbox" 
                       checked={removeOriginalPdf} 
@@ -886,7 +940,7 @@ const App = () => {
                     <div key={idx} className="flex justify-between items-center p-3 bg-secondary/70 rounded-xl border border-slate-200 hover:border-red-500/20 transition-all">
                       <div className="flex items-center gap-3 overflow-hidden">
                         <FileJson className="w-4 h-4 text-red-400 shrink-0" />
-                        <span className="text-xs truncate text-slate-300" title={file.name}>{file.name}</span>
+                        <span className="text-xs truncate text-ink-soft" title={file.name}>{file.name}</span>
                         <span className="text-[10px] text-slate-500 shrink-0 bg-secondary/70 px-2 py-0.5 rounded">{file.size}</span>
                       </div>
                       <div className="flex items-center gap-2">
@@ -914,7 +968,7 @@ const App = () => {
                     <ImageIcon className="w-5 h-5 text-emerald-400" />
                   </div>
                   <div>
-                    <h3 className="font-bold text-white">Image Optimizer</h3>
+                    <h3 className="font-bold text-ink">Image Optimizer</h3>
                     <p className="text-xs text-slate-500">Batch optimize images. {imageFiles.length} file(s) found.</p>
                   </div>
                 </div>
@@ -926,7 +980,7 @@ const App = () => {
                   <button onClick={refreshMediaFiles} className="btn-ghost py-2 px-4 flex items-center justify-center gap-2 text-xs shrink-0 border border-slate-700">
                     <RotateCcw className="w-4 h-4" /> Refresh
                   </button>
-                  <label className="flex items-center gap-2 text-xs text-emerald-300 cursor-pointer">
+                  <label className="flex items-center gap-2 text-xs text-emerald-700 cursor-pointer">
                     <input 
                       type="checkbox" 
                       checked={removeOriginalImage} 
@@ -947,7 +1001,7 @@ const App = () => {
                     <div key={idx} className="flex justify-between items-center p-3 bg-secondary/70 rounded-xl border border-slate-200 hover:border-emerald-500/20 transition-all">
                       <div className="flex items-center gap-3 overflow-hidden">
                         <ImageIcon className="w-4 h-4 text-emerald-400 shrink-0" />
-                        <span className="text-xs truncate text-slate-300" title={file.name}>{file.name}</span>
+                        <span className="text-xs truncate text-ink-soft" title={file.name}>{file.name}</span>
                         <span className="text-[10px] text-slate-500 shrink-0 bg-secondary/70 px-2 py-0.5 rounded">{file.size}</span>
                       </div>
                       <div className="flex items-center gap-2">
@@ -972,12 +1026,12 @@ const App = () => {
 
       case 'advanced':
         return (
-          <div className="p-8 grid grid-cols-2 gap-6 overflow-y-auto custom-scrollbar">
+          <div className="absolute inset-0 overflow-y-auto custom-scrollbar p-8 grid grid-cols-2 gap-6">
             <div className="col-span-2 mb-2 flex items-center justify-between flex-wrap gap-3">
               <h2 className="text-2xl font-bold flex items-center gap-3 text-violet-400">
                 <Layers className="w-8 h-8" /> Advanced Tools
               </h2>
-              <label className="flex items-center gap-2 text-xs text-violet-300 cursor-pointer bg-violet-500/10 border border-violet-500/20 rounded-xl px-4 py-2">
+              <label className="flex items-center gap-2 text-xs text-violet-700 cursor-pointer bg-violet-500/10 border border-violet-500/20 rounded-xl px-4 py-2">
                 <input
                   type="checkbox"
                   checked={recursiveMode}
@@ -989,6 +1043,52 @@ const App = () => {
               </label>
             </div>
             
+            <div className="col-span-2 glass-card space-y-4 border-primary/30">
+              <div className="flex items-center justify-between flex-wrap gap-3">
+                <div className="flex items-center gap-2 text-primary font-bold">
+                  <FolderArchive className="w-5 h-5" /> Batch Folder Zipper
+                </div>
+                <button onClick={loadZipFolders} className="text-[10px] font-bold text-slate-500 hover:text-primary flex items-center gap-1">
+                  <RefreshCw className="w-3 h-3" /> Refresh list
+                </button>
+              </div>
+              <p className="text-xs text-ink-soft leading-relaxed">
+                Select several top-level folders and zip each one into its own archive in a single pass — hand it a custom extension (e.g. <span className="font-mono text-primary">.cbz</span> for comic pages, <span className="font-mono text-primary">.bak</span> for a disguised backup) to fold "zip" and "change extension" into one step, instead of two.
+              </p>
+
+              <div className="border border-slate-300 rounded-xl max-h-52 overflow-y-auto custom-scrollbar divide-y divide-slate-200 bg-secondary/30">
+                {zipFolders.length === 0 && (
+                  <div className="text-center py-8 text-xs text-slate-600 italic">No subfolders found in this workspace.</div>
+                )}
+                {zipFolders.map((f) => (
+                  <label key={f.name} className="flex items-center gap-3 px-4 py-2.5 cursor-pointer hover:bg-secondary/50 transition-colors">
+                    <input type="checkbox" checked={zipSelected.includes(f.name)} onChange={() => toggleZipSelected(f.name)} className="accent-primary w-4 h-4" />
+                    <span className="flex-1 text-xs font-bold text-ink truncate">{f.name}</span>
+                    <span className="text-[10px] text-slate-500 shrink-0">{f.item_count} item{f.item_count !== 1 ? 's' : ''}</span>
+                    <span className="text-[10px] font-mono text-primary w-16 text-right shrink-0">{f.size_str}</span>
+                  </label>
+                ))}
+              </div>
+
+              <div className="flex flex-wrap items-end gap-4">
+                <div className="flex flex-col gap-1">
+                  <span className="text-[10px] uppercase tracking-widest text-slate-500 font-bold">Archive extension</span>
+                  <input type="text" value={zipTargetExt} onChange={(e) => setZipTargetExt(e.target.value)} placeholder=".zip" className="glass-input w-28 py-1.5 text-xs font-mono" />
+                </div>
+                <label className="flex items-center gap-2 text-xs text-ink-soft cursor-pointer bg-secondary/40 border border-slate-300 rounded-xl px-3 py-2">
+                  <input type="checkbox" checked={zipDeleteOriginals} onChange={(e) => setZipDeleteOriginals(e.target.checked)} className="accent-accent" />
+                  Send originals to Recycle Bin after zipping
+                </label>
+                <button
+                  onClick={() => runOperation('batch_zip_folders', zipSelected, zipTargetExt, zipDeleteOriginals)}
+                  disabled={zipSelected.length === 0}
+                  className="ml-auto btn-primary flex items-center gap-2 disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  <FolderArchive className="w-4 h-4" /> Zip {zipSelected.length || ''} Folder{zipSelected.length !== 1 ? 's' : ''}
+                </button>
+              </div>
+            </div>
+
             <div className="glass-card space-y-4">
               <div className="flex items-center gap-2 text-violet-400 font-bold">
                 <Wand2 className="w-5 h-5" /> Regex Renamer
@@ -1042,8 +1142,8 @@ const App = () => {
                 <span className="truncate max-w-[100px] text-teal-400">{backupDest || 'Select Dest…'}</span>
               </div>
               <div className="flex gap-2">
-                <button onClick={handleSelectBackupDest} className="flex-1 py-2 bg-slate-800 rounded-lg text-[10px] font-bold">Select Dest</button>
-                <button onClick={() => runOperation('additive_backup', backupDest)} className="flex-[2] py-2 bg-teal-600 rounded-lg text-[10px] font-bold">Run Backup</button>
+                <button onClick={handleSelectBackupDest} className="flex-1 py-2 bg-secondary border border-slate-300 text-ink rounded-lg text-[10px] font-bold hover:bg-slate-200 transition-colors">Select Dest</button>
+                <button onClick={() => runOperation('additive_backup', backupDest)} className="flex-[2] py-2 bg-filed text-on-filed rounded-lg text-[10px] font-bold hover:bg-filed-dark transition-colors">Run Backup</button>
               </div>
             </div>
           </div>
@@ -1051,7 +1151,7 @@ const App = () => {
 
       case 'rules':
         return (
-          <div className="p-8 max-w-3xl mx-auto space-y-6">
+          <div className="absolute inset-0 overflow-y-auto custom-scrollbar p-8 max-w-3xl mx-auto space-y-6">
             <div className="glass-card">
                <div className="flex justify-between items-center mb-6">
                   <h2 className="text-2xl font-bold flex items-center gap-3">
@@ -1064,9 +1164,9 @@ const App = () => {
 
                <div className="space-y-4">
                  <div className="grid grid-cols-3 gap-3">
-                    <input type="text" placeholder="Folder Name" value={newRuleFolder} onChange={e => setNewRuleFolder(e.target.value)} className="bg-secondary/70 border border-slate-700/50 rounded-xl px-4 py-3 text-xs" />
-                    <input type="text" placeholder="Extensions (csv)" value={newRuleExts} onChange={e => setNewRuleExts(e.target.value)} className="bg-secondary/70 border border-slate-700/50 rounded-xl px-4 py-3 text-xs" />
-                    <input type="text" placeholder="Keywords (csv)" value={newRuleKeywords} onChange={e => setNewRuleKeywords(e.target.value)} className="bg-secondary/70 border border-slate-700/50 rounded-xl px-4 py-3 text-xs" />
+                    <input type="text" placeholder="Folder Name" value={newRuleFolder} onChange={e => setNewRuleFolder(e.target.value)} className="glass-input text-xs" />
+                    <input type="text" placeholder="Extensions (csv)" value={newRuleExts} onChange={e => setNewRuleExts(e.target.value)} className="glass-input text-xs" />
+                    <input type="text" placeholder="Keywords (csv)" value={newRuleKeywords} onChange={e => setNewRuleKeywords(e.target.value)} className="glass-input text-xs" />
                  </div>
                  <button onClick={handleAddRule} className="w-full py-3 border border-indigo-500/30 bg-indigo-500/5 text-indigo-400 rounded-xl text-xs font-bold uppercase tracking-widest hover:bg-indigo-500/10 transition-all">Add New Rule</button>
                </div>
@@ -1078,10 +1178,10 @@ const App = () => {
                           <FolderOpen className="w-5 h-5 text-indigo-400" />
                        </div>
                        <div className="flex-1 min-w-0">
-                          <div className="font-bold text-slate-200">/ {rule.folder}</div>
+                          <div className="font-bold text-ink">/ {rule.folder}</div>
                           <div className="flex gap-2 mt-1">
                              {rule.extensions.map(ex => <span key={ex} className="text-[9px] font-mono text-slate-500 px-1.5 py-0.5 bg-secondary/70 rounded border border-slate-200">{ex}</span>)}
-                             {rule.keywords.map(kw => <span key={kw} className="text-[9px] text-indigo-300 px-1.5 py-0.5 bg-indigo-500/10 rounded">{kw}</span>)}
+                             {rule.keywords.map(kw => <span key={kw} className="text-[9px] text-indigo-700 px-1.5 py-0.5 bg-indigo-500/10 rounded">{kw}</span>)}
                           </div>
                        </div>
                        <button onClick={() => handleDeleteRule(idx)} aria-label="Delete this rule" className="p-2 text-slate-600 hover:text-red-400 transition-colors opacity-0 group-hover:opacity-100">
@@ -1096,7 +1196,7 @@ const App = () => {
 
       case 'stats':
         return (
-          <div className="p-8 space-y-8 overflow-y-auto custom-scrollbar">
+          <div className="absolute inset-0 overflow-y-auto custom-scrollbar p-8 space-y-8">
             <h2 className="text-2xl font-bold flex items-center gap-3">
               <BarChart3 className="w-8 h-8 text-primary" /> Workspace Analytics
             </h2>
@@ -1108,10 +1208,10 @@ const App = () => {
                        {Object.entries(stats.categories).sort((a,b) => b[1] - a[1]).map(([cat, size]) => (
                          <div key={cat} className="space-y-1">
                             <div className="flex justify-between text-xs">
-                               <span className="text-slate-300">{cat}</span>
+                               <span className="text-ink-soft">{cat}</span>
                                <span className="text-slate-500">{Math.round(size / 1024 / 1024)} MB</span>
                             </div>
-                            <div className="h-1.5 w-full bg-slate-800 rounded-full overflow-hidden">
+                            <div className="h-1.5 w-full bg-slate-200 rounded-full overflow-hidden">
                                <div className="h-full bg-primary" style={{ width: `${(size / stats.total_size) * 100}%` }} />
                             </div>
                          </div>
@@ -1122,7 +1222,7 @@ const App = () => {
                     <h3 className="text-sm font-bold uppercase tracking-widest text-slate-500 mb-6">File Counts</h3>
                     <div className="text-6xl font-bold text-primary">{stats.file_count}</div>
                     <div className="text-xs text-slate-500 mt-2">Total files scanned and indexed</div>
-                    <div className="mt-8 p-4 bg-primary/5 rounded-xl border border-primary/20 text-xs text-slate-400 leading-relaxed italic">
+                    <div className="mt-8 p-4 bg-primary/5 rounded-xl border border-primary/20 text-xs text-ink-soft leading-relaxed italic">
                       Analytics are based on the latest scan of your workspace. Refresh to update data after massive operations.
                     </div>
                  </div>
@@ -1141,17 +1241,17 @@ const App = () => {
     <div className="flex h-screen w-full bg-background text-ink overflow-hidden font-sans">
       
       {/* ── Sidebar Navigation ── */}
-      <aside className="w-72 border-r border-slate-300 bg-secondary/50 flex flex-col shrink-0">
+      <aside className="w-64 border-r border-slate-300 bg-secondary/50 flex flex-col shrink-0">
         <div className="p-8">
            <h1 className="text-2xl font-bold font-serif text-ink flex items-center gap-3">
-             <div className="w-8 h-8 bg-primary rounded-md flex items-center justify-center">
-               <FolderSync className="w-5 h-5 text-[#FBF8F1]" />
+             <div className="w-8 h-8 bg-primary rounded-md flex items-center justify-center overflow-hidden shrink-0">
+               <LogoMark className="w-7 h-7" />
              </div>
              Organizer <span className="text-xs font-medium text-slate-600 bg-slate-200 border border-slate-300 px-1.5 py-0.5 rounded ml-auto font-sans">V5</span>
            </h1>
         </div>
 
-        <nav className="flex-1 overflow-y-auto px-4 py-2 space-y-8 custom-scrollbar">
+        <nav className="flex-1 overflow-y-auto px-4 py-2 space-y-6 custom-scrollbar">
            {['General', 'Organizer', 'Processing', 'System'].map(group => (
              <div key={group} className="space-y-2">
                 <h3 className="px-4 text-[10px] font-black uppercase tracking-[0.2em] text-slate-500">{group}</h3>
@@ -1161,7 +1261,7 @@ const App = () => {
                        key={item.id}
                        onClick={() => setActiveView(item.id)}
                        aria-current={activeView === item.id ? 'page' : undefined}
-                       className={`w-full flex items-center gap-3 px-4 py-3 rounded-md transition-all duration-200 group ${activeView === item.id ? 'bg-[#FBF8F1] text-primary border border-slate-300 border-r-0' : 'text-slate-600 hover:bg-slate-200/60 hover:text-ink border border-transparent'}`}
+                       className={`w-full flex items-center gap-3 px-4 py-2.5 rounded-md transition-all duration-200 group ${activeView === item.id ? 'bg-card text-primary border border-slate-300 border-r-0' : 'text-slate-600 hover:bg-slate-200/60 hover:text-ink border border-transparent'}`}
                      >
                         <item.icon className={`w-5 h-5 ${activeView === item.id ? 'text-primary' : 'text-slate-500 group-hover:text-slate-600'}`} aria-hidden="true" />
                         <span className="text-sm font-semibold">{item.label}</span>
@@ -1174,14 +1274,22 @@ const App = () => {
         </nav>
 
         <div className="p-6 border-t border-slate-300">
-           <div className="flex items-center gap-3 p-3 bg-[#FBF8F1] rounded-md border border-slate-300">
+           <div className="flex items-center gap-3 p-3 bg-card rounded-md border border-slate-300">
               <div className="w-10 h-10 rounded-full bg-slate-200 border border-slate-300 flex items-center justify-center">
                  <Settings className="w-5 h-5 text-slate-500" />
               </div>
               <div className="flex-1 min-w-0">
-                 <div className="text-[10px] font-bold text-ink truncate uppercase tracking-widest">NeoGiant</div>
-                 <div className="text-[10px] text-slate-500 truncate">System Administrator</div>
+                 <div className="text-[10px] font-bold text-ink truncate uppercase tracking-widest">Folders Organizer Pro</div>
+                 <div className="text-[10px] text-slate-500 truncate">Local desktop build · v5</div>
               </div>
+              <button
+                onClick={toggleTheme}
+                aria-label={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+                title={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+                className="w-9 h-9 shrink-0 rounded-full border border-slate-300 hover:border-primary/50 hover:bg-secondary/60 flex items-center justify-center transition-colors"
+              >
+                {theme === 'dark' ? <Sun className="w-4 h-4 text-amber-500" /> : <Moon className="w-4 h-4 text-slate-600" />}
+              </button>
            </div>
         </div>
       </aside>
@@ -1203,19 +1311,19 @@ const App = () => {
             </div>
 
             <div className="flex items-center gap-6">
-              <div className="flex items-center gap-3 bg-[#FBF8F1] px-4 py-2 rounded-md border border-slate-300">
+              <div className="flex items-center gap-3 bg-card px-4 py-2 rounded-md border border-slate-300">
                 <span id="dry-run-label" className="text-[10px] font-black uppercase tracking-widest text-slate-500">Simulation</span>
                 <button
                   onClick={() => setIsDryRun(!isDryRun)}
                   role="switch"
                   aria-checked={isDryRun}
                   aria-labelledby="dry-run-label"
-                  className={`w-10 h-5 rounded-full p-1 transition-all relative ${isDryRun ? 'bg-accent shadow-[0_0_10px_rgba(244,63,94,0.3)]' : 'bg-slate-700'}`}
+                  className={`w-10 h-5 rounded-full p-1 transition-all relative ${isDryRun ? 'bg-filed' : 'bg-slate-700'}`}
                 >
                   <div className={`w-3 h-3 bg-white rounded-full transition-transform duration-300 ${isDryRun ? 'translate-x-5' : 'translate-x-0'}`} />
                 </button>
               </div>
-              <button onClick={handleRefreshStats} aria-label="Refresh workspace statistics" className="p-2.5 text-slate-500 hover:text-primary transition-colors bg-[#FBF8F1] border border-slate-300 rounded-md">
+              <button onClick={handleRefreshStats} aria-label="Refresh workspace statistics" className="p-2.5 text-slate-500 hover:text-primary transition-colors bg-card border border-slate-300 rounded-md">
                  <RefreshCw className={`w-5 h-5 ${isRefreshing ? 'animate-spin' : ''}`} />
               </button>
             </div>
@@ -1228,7 +1336,7 @@ const App = () => {
       </main>
 
       {/* ── Utility & Status Rail ── */}
-      <aside className="w-80 border-l border-slate-300 bg-secondary/50 flex flex-col shrink-0">
+      <aside className="w-72 border-l border-slate-300 bg-secondary/50 flex flex-col shrink-0">
         <div className="p-6 border-b border-slate-300">
            <h3 className="text-xs font-black uppercase tracking-[0.2em] text-slate-500 mb-4">Largest Assets</h3>
            <div className="space-y-2 max-h-[300px] overflow-y-auto custom-scrollbar pr-2">
@@ -1239,18 +1347,18 @@ const App = () => {
                   className="w-full text-left p-3 bg-secondary/40 border border-slate-200 rounded-xl hover:bg-secondary/60 hover:border-primary/30 transition-all group"
                 >
                   <div className="flex justify-between items-start gap-2">
-                    <span className="text-[11px] font-bold truncate text-slate-300 group-hover:text-primary flex-1">{file.name}</span>
+                    <span className="text-[11px] font-bold truncate text-ink-soft group-hover:text-primary flex-1">{file.name}</span>
                     <span className="text-[10px] font-mono text-primary shrink-0">{file.size_str}</span>
                   </div>
                   <div className="mt-1 flex items-center gap-2">
                     <span className="text-[8px] text-slate-600 uppercase tracking-widest font-black">{file.type}</span>
-                    <div className="flex-1 h-0.5 bg-slate-800 rounded-full overflow-hidden">
+                    <div className="flex-1 h-0.5 bg-slate-200 rounded-full overflow-hidden">
                        <div className="h-full bg-primary/40" style={{ width: '40%' }} />
                     </div>
                   </div>
                 </button>
               ))}
-              {!stats && <div className="text-center py-10 text-[10px] text-slate-700 italic">No assets indexed.</div>}
+              {!stats && <div className="text-center py-10 text-[10px] text-slate-600 italic px-4 leading-relaxed">Connect a workspace folder to see your largest files here.</div>}
            </div>
         </div>
 
@@ -1258,13 +1366,14 @@ const App = () => {
         <div className="flex-1 flex flex-col min-h-0">
            <div className="px-6 py-4 border-b border-slate-300 flex justify-between items-center bg-secondary/40">
               <span className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-500">Live Console</span>
-              <button onClick={() => setLogs([])} className="text-[8px] text-slate-700 hover:text-slate-400 uppercase font-black">Flush</button>
+              <button onClick={() => setLogs([])} className="text-[8px] text-slate-700 hover:text-slate-500 uppercase font-black">Flush</button>
            </div>
            <div className="flex-1 overflow-y-auto p-6 font-mono text-[10px] space-y-2 custom-scrollbar">
+              {logs.length === 0 && <div className="text-slate-600 italic">Operation activity will appear here.</div>}
               {logs.map((log, i) => (
                 <div key={i} className="flex gap-3 leading-relaxed">
                   <span className="text-slate-800 shrink-0 select-none">[{log.timestamp}]</span>
-                  <span className={log.type === 'error' ? 'text-red-500' : log.type === 'success' ? 'text-emerald-400' : 'text-slate-400'}>
+                  <span className={log.type === 'error' ? 'text-red-600' : log.type === 'success' ? 'text-emerald-700' : 'text-slate-600'}>
                     {log.message}
                   </span>
                 </div>
@@ -1275,7 +1384,7 @@ const App = () => {
 
       {/* ── Asset Preview Overlay ── */}
       {sidebarOpen && selectedFile && (
-        <div className="fixed inset-y-0 right-0 w-[400px] bg-[#FBF8F1] border-l border-slate-300 shadow-[-4px_0_24px_rgba(31,27,22,0.12)] z-[150] p-10 flex flex-col animate-in slide-in-from-right duration-300">
+        <div className="fixed inset-y-0 right-0 w-[400px] bg-card border-l border-slate-300 shadow-[-4px_0_24px_rgba(31,27,22,0.12)] z-[150] p-10 flex flex-col animate-in slide-in-from-right duration-300">
            <div className="flex justify-between items-center mb-10">
               <h3 className="text-sm font-black uppercase tracking-[0.3em] text-primary">Metadata Insight</h3>
               <button onClick={() => setSidebarOpen(false)} aria-label="Close file details panel" className="w-10 h-10 rounded-full hover:bg-secondary/50 flex items-center justify-center transition-colors">
@@ -1297,7 +1406,7 @@ const App = () => {
            <div className="flex-1 space-y-8 overflow-y-auto custom-scrollbar pr-2">
               <div className="space-y-1">
                  <div className="text-[9px] font-black uppercase tracking-widest text-slate-600">Full Filename</div>
-                 <div className="text-sm text-slate-100 font-bold leading-snug break-all">{selectedFile.name}</div>
+                 <div className="text-sm text-ink font-bold leading-snug break-all">{selectedFile.name}</div>
               </div>
               
               <div className="grid grid-cols-2 gap-8">
@@ -1313,7 +1422,7 @@ const App = () => {
 
               <div className="space-y-1">
                  <div className="text-[9px] font-black uppercase tracking-widest text-slate-600">Last Transformation</div>
-                 <div className="text-sm text-slate-400">{selectedFile.modified}</div>
+                 <div className="text-sm text-ink-soft">{selectedFile.modified}</div>
               </div>
 
               <div className="pt-6 border-t border-slate-200">
@@ -1330,47 +1439,47 @@ const App = () => {
 
       {/* ── Modals & Overlays ── */}
       {showSystemWarning && (
-        <div role="alertdialog" aria-modal="true" aria-labelledby="system-warning-title" className="fixed inset-0 bg-black/90 backdrop-blur-xl flex items-center justify-center z-[200] p-10">
-          <div className="w-[500px] glass border-red-500/50 rounded-[2rem] p-12 shadow-[0_0_100px_rgba(239,68,68,0.2)] flex flex-col gap-8 text-center">
-            <div className="mx-auto w-20 h-20 rounded-3xl bg-red-500/20 flex items-center justify-center">
-              <ShieldAlert className="w-10 h-10 text-red-500" aria-hidden="true" />
+        <div role="alertdialog" aria-modal="true" aria-labelledby="system-warning-title" className="fixed inset-0 bg-ink/70 backdrop-blur-sm flex items-center justify-center z-[200] p-10">
+          <div className="w-[500px] bg-card border border-accent/40 rounded-2xl p-12 shadow-[3px_5px_0_rgba(31,27,22,0.14)] flex flex-col gap-8 text-center">
+            <div className="mx-auto w-20 h-20 rounded-full bg-accent/10 border border-accent/30 flex items-center justify-center">
+              <ShieldAlert className="w-10 h-10 text-accent" aria-hidden="true" />
             </div>
             <div>
-               <h2 id="system-warning-title" className="text-2xl font-black text-white mb-4">Critical Protection Shield</h2>
-               <p className="text-slate-400 text-sm leading-relaxed">
-                 You have selected a <span className="text-red-500 font-bold underline">Root or System partition</span>. 
+               <h2 id="system-warning-title" className="text-2xl font-black text-ink mb-4 font-serif">Critical Protection Shield</h2>
+               <p className="text-ink-soft text-sm leading-relaxed">
+                 You have selected a <span className="text-accent font-bold underline">Root or System partition</span>. 
                  Proceeding here can lead to unrecoverable system failure. Do you have explicit clearance?
                </p>
             </div>
-            <div className="bg-red-500/10 border border-red-500/20 rounded-2xl p-4 font-mono text-xs text-red-400 break-all">
+            <div className="bg-accent/5 border border-accent/20 rounded-lg p-4 font-mono text-xs text-accent break-all">
               {pendingSystemPath}
             </div>
             <div className="flex gap-4">
-              <button autoFocus onClick={() => { setShowSystemWarning(false); setPendingSystemPath(''); }} aria-label="Abort — do not proceed with this system directory" className="flex-1 py-4 bg-slate-900 border border-slate-300 text-slate-400 rounded-2xl text-xs font-black uppercase tracking-widest hover:bg-slate-800 transition-all">Abort</button>
-              <button onClick={handleConfirmSystemPath} aria-label="Manual override — proceed anyway" className="flex-1 py-4 bg-red-600 text-white rounded-2xl text-xs font-black uppercase tracking-widest hover:bg-red-500 transition-all shadow-lg shadow-red-600/20">Manual Override</button>
+              <button autoFocus onClick={() => { setShowSystemWarning(false); setPendingSystemPath(''); }} aria-label="Abort — do not proceed with this system directory" className="flex-1 py-4 bg-secondary border border-slate-300 text-ink rounded-md text-xs font-black uppercase tracking-widest hover:bg-slate-200 transition-all">Abort</button>
+              <button onClick={handleConfirmSystemPath} aria-label="Manual override — proceed anyway" className="flex-1 py-4 bg-accent text-on-accent rounded-md text-xs font-black uppercase tracking-widest hover:bg-accent/90 transition-all" style={{ boxShadow: '1px 2px 0 rgba(31,27,22,0.2)' }}>Manual Override</button>
             </div>
           </div>
         </div>
       )}
 
       {previewItems && (
-        <div role="dialog" aria-modal="true" aria-labelledby="preview-dialog-title" className="fixed inset-0 bg-black/80 backdrop-blur-lg flex items-center justify-center z-[190] p-10">
-          <div className="w-[640px] max-h-[80vh] glass border-primary/30 rounded-[2rem] p-8 shadow-2xl flex flex-col gap-4">
+        <div role="dialog" aria-modal="true" aria-labelledby="preview-dialog-title" className="fixed inset-0 bg-ink/70 backdrop-blur-sm flex items-center justify-center z-[190] p-10">
+          <div className="w-[640px] max-h-[80vh] bg-card border border-slate-300 rounded-2xl p-8 shadow-[3px_5px_0_rgba(31,27,22,0.1)] flex flex-col gap-4">
             <div className="flex items-center justify-between">
-              <h2 id="preview-dialog-title" className="text-lg font-black text-white flex items-center gap-2">
+              <h2 id="preview-dialog-title" className="text-lg font-black text-ink flex items-center gap-2 font-serif">
                 <FileSearch className="w-5 h-5 text-primary" aria-hidden="true" />
                 Simulation Preview — {previewItems.opTitle}
               </h2>
-              <button onClick={() => setPreviewItems(null)} aria-label="Close preview" className="w-9 h-9 rounded-full hover:bg-secondary/50 flex items-center justify-center text-slate-400">✕</button>
+              <button onClick={() => setPreviewItems(null)} aria-label="Close preview" className="w-9 h-9 rounded-full hover:bg-secondary/70 flex items-center justify-center text-ink-soft">✕</button>
             </div>
-            <p className="text-xs text-slate-500">
+            <p className="text-xs text-ink-soft">
               {previewItems.items.length} planned change{previewItems.items.length !== 1 ? 's' : ''} — nothing has been moved yet. Turn off Dry Run and re-run to apply.
             </p>
             <div className="flex-1 overflow-y-auto custom-scrollbar space-y-2 pr-2">
               {previewItems.items.map((item, i) => (
                 <div key={i} className="bg-secondary/40 border border-slate-200 rounded-lg p-3 text-xs font-mono flex flex-col gap-1">
-                  <span className="text-slate-500 truncate">{item.src}</span>
-                  <span className="text-emerald-400 truncate">→ {item.dst}</span>
+                  <span className="text-ink-soft truncate">{item.src}</span>
+                  <span className="text-filed truncate">→ {item.dst}</span>
                 </div>
               ))}
             </div>
@@ -1379,18 +1488,18 @@ const App = () => {
       )}
 
       {confirmDialog && (
-        <div role="alertdialog" aria-modal="true" aria-labelledby="confirm-dialog-title" className="fixed inset-0 bg-black/90 backdrop-blur-xl flex items-center justify-center z-[200] p-10">
-          <div className="w-[480px] glass border-amber-500/40 rounded-[2rem] p-10 shadow-[0_0_100px_rgba(245,158,11,0.15)] flex flex-col gap-6 text-center">
-            <div className="mx-auto w-16 h-16 rounded-3xl bg-amber-500/20 flex items-center justify-center">
-              <ShieldAlert className="w-8 h-8 text-amber-500" aria-hidden="true" />
+        <div role="alertdialog" aria-modal="true" aria-labelledby="confirm-dialog-title" className="fixed inset-0 bg-ink/70 backdrop-blur-sm flex items-center justify-center z-[200] p-10">
+          <div className="w-[480px] bg-card border border-amber-500/40 rounded-2xl p-10 shadow-[3px_5px_0_rgba(31,27,22,0.14)] flex flex-col gap-6 text-center">
+            <div className="mx-auto w-16 h-16 rounded-full bg-amber-500/10 border border-amber-500/30 flex items-center justify-center">
+              <ShieldAlert className="w-8 h-8 text-amber-600" aria-hidden="true" />
             </div>
             <div>
-              <h2 id="confirm-dialog-title" className="text-xl font-black text-white mb-3">{confirmDialog.title}</h2>
-              <p className="text-slate-400 text-sm leading-relaxed">{confirmDialog.message}</p>
+              <h2 id="confirm-dialog-title" className="text-xl font-black text-ink mb-3 font-serif">{confirmDialog.title}</h2>
+              <p className="text-ink-soft text-sm leading-relaxed">{confirmDialog.message}</p>
             </div>
             <div className="flex gap-4">
-              <button autoFocus onClick={() => setConfirmDialog(null)} aria-label="Cancel this operation" className="flex-1 py-3 bg-slate-900 border border-slate-300 text-slate-400 rounded-2xl text-xs font-black uppercase tracking-widest hover:bg-slate-800 transition-all">Cancel</button>
-              <button onClick={confirmDialog.onConfirm} aria-label="Confirm and proceed" className="flex-1 py-3 bg-amber-600 text-white rounded-2xl text-xs font-black uppercase tracking-widest hover:bg-amber-500 transition-all shadow-lg shadow-amber-600/20">Proceed</button>
+              <button autoFocus onClick={() => setConfirmDialog(null)} aria-label="Cancel this operation" className="flex-1 py-3 bg-secondary border border-slate-300 text-ink rounded-md text-xs font-black uppercase tracking-widest hover:bg-slate-200 transition-all">Cancel</button>
+              <button onClick={confirmDialog.onConfirm} aria-label="Confirm and proceed" className="flex-1 py-3 bg-amber-600 text-on-amber rounded-md text-xs font-black uppercase tracking-widest hover:bg-amber-500 transition-all" style={{ boxShadow: '1px 2px 0 rgba(31,27,22,0.2)' }}>Proceed</button>
             </div>
           </div>
         </div>
@@ -1400,15 +1509,15 @@ const App = () => {
         <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-md flex flex-col items-center justify-center z-[300]">
           <div className="relative w-48 h-48">
             <svg className="w-full h-full transform -rotate-90">
-              <circle cx="96" cy="96" r="88" stroke="currentColor" strokeWidth="8" fill="transparent" className="text-slate-900" />
+              <circle cx="96" cy="96" r="88" stroke="currentColor" strokeWidth="8" fill="transparent" className="text-slate-700" />
               <circle cx="96" cy="96" r="88" stroke="currentColor" strokeWidth="8" fill="transparent" strokeDasharray={552.92} strokeDashoffset={552.92 - (552.92 * progress) / 100} className="text-primary transition-all duration-300 ease-out" />
             </svg>
             <div className="absolute inset-0 flex flex-col items-center justify-center">
               <span className="text-4xl font-black text-white">{progress}%</span>
-              <span className="text-[10px] font-black text-primary uppercase tracking-[0.2em] mt-1">Hashed</span>
+              <span className="text-[10px] font-black text-primary uppercase tracking-[0.2em] mt-1">Complete</span>
             </div>
           </div>
-          <p className="mt-10 text-[10px] font-black text-slate-500 tracking-[0.5em] uppercase animate-pulse">Neural Engine Processing</p>
+          <p className="mt-10 text-[10px] font-black text-slate-500 tracking-[0.5em] uppercase animate-pulse">Processing Records</p>
         </div>
       )}
     </div>

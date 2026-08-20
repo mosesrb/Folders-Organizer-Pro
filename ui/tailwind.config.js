@@ -1,9 +1,19 @@
 /** @type {import('tailwindcss').Config} */
+
+// Wraps a CSS variable holding a raw "R G B" triplet so Tailwind can inject
+// an alpha channel for opacity-modifier utilities (bg-primary/20, etc.).
+// The variable itself must hold "R G B", not a hex string or rgb()/rgba() —
+// see the comment at the top of index.css's variable block.
+function withOpacity(varName) {
+  return `rgb(var(${varName}) / <alpha-value>)`;
+}
+
 export default {
   content: [
     "./index.html",
     "./src/**/*.{js,ts,jsx,tsx}",
   ],
+  darkMode: ['selector', '[data-theme="dark"]'],
   theme: {
     extend: {
       fontFamily: {
@@ -12,53 +22,73 @@ export default {
         mono: ['"IBM Plex Mono"', 'ui-monospace', 'monospace'],
       },
       colors: {
-        background: "#F3EEE4",   // paper cream — page bg
-        secondary: "#EAE1CD",    // card stock — recessed panel bg
+        // Every color below points at a CSS custom property defined in
+        // index.css ([:root]/[data-theme="light"] vs [data-theme="dark"]).
+        // This is deliberate: it means every existing `bg-slate-400`,
+        // `text-primary`, `border-primary/20`, etc. utility class across
+        // the whole app automatically responds to the theme attribute on
+        // <html> with zero changes to any className — only the variable
+        // values in index.css differ per theme. Don't replace these with
+        // literal hex again; that would silently break dark mode (and
+        // every opacity-modifier usage) for whatever token you change.
+        background: withOpacity('--color-background'),
+        secondary: withOpacity('--color-secondary'),
+        card: withOpacity('--color-card'),
         ink: {
-          DEFAULT: "#1F1B16",    // primary text
-          soft: "#4A4238",       // secondary text
+          DEFAULT: withOpacity('--color-ink'),
+          soft: withOpacity('--color-ink-soft'),
         },
         primary: {
-          DEFAULT: "#8B6A3F",    // manila brown — primary actions/links
-          dark: "#6B4F2C",
-          light: "#B08356",
+          DEFAULT: withOpacity('--color-primary'),
+          dark: withOpacity('--color-primary-dark'),
+          light: withOpacity('--color-primary-light'),
         },
         accent: {
-          DEFAULT: "#8A2E2E",    // stamp red — destructive/alert
+          DEFAULT: withOpacity('--color-accent'),
         },
         filed: {
-          DEFAULT: "#3D5A45",    // filed-away green — success/positive
-          light: "#5C7A62",
-          dark: "#2A4030",
+          DEFAULT: withOpacity('--color-filed'),
+          light: withOpacity('--color-filed-light'),
+          dark: withOpacity('--color-filed-dark'),
         },
+        // "on-*" = the text/icon color to use ON TOP of a bg-accent /
+        // bg-filed / bg-amber-600 fill. Needed because accent/filed/amber
+        // brighten in dark mode (for standalone text contrast) while
+        // still needing to pair with readable text when used as a solid
+        // button fill — see the 2026-08-19 memories.md entry.
+        "on-primary": withOpacity('--on-primary'),
+        "on-accent": withOpacity('--on-accent'),
+        "on-filed": withOpacity('--on-filed'),
+        "on-amber": withOpacity('--on-amber'),
         surface: {
-          DEFAULT: "rgba(31, 27, 22, 0.03)",
-          hover: "rgba(31, 27, 22, 0.06)",
-          border: "rgba(31, 27, 22, 0.14)",
+          DEFAULT: "var(--surface-default)",
+          hover: "var(--surface-hover)",
+          border: "var(--surface-border)",
         },
 
         // Warm paper-neutral ramp replaces the stock dark "slate" palette
         // used throughout the app's structural chrome (backgrounds, text,
-        // borders) — this single remap converts most of the app from a
-        // near-black dashboard to a cream paper surface with no per-line edits.
+        // borders). Each shade keeps the same *role* across themes (100 =
+        // closest to page background, 900 = closest to ink) even though
+        // the actual dark-mode values are lightness-inverted.
         slate: {
-          50:  "#FBF8F1",
-          100: "#F3EEE4",
-          200: "#EAE1CD",
-          300: "#D8CDB8",
-          400: "#B7A98C",
-          500: "#8C7F68",
-          600: "#6B5F4D",
-          700: "#4A4238",
-          800: "#33291E",
-          900: "#241D15",
-          950: "#1F1B16",
+          50:  withOpacity('--slate-50'),
+          100: withOpacity('--slate-100'),
+          200: withOpacity('--slate-200'),
+          300: withOpacity('--slate-300'),
+          400: withOpacity('--slate-400'),
+          500: withOpacity('--slate-500'),
+          600: withOpacity('--slate-600'),
+          700: withOpacity('--slate-700'),
+          800: withOpacity('--slate-800'),
+          900: withOpacity('--slate-900'),
+          950: withOpacity('--slate-950'),
         },
 
         // Destructive / stamp-red family (was the stock "red")
         red: {
-          300: "#D9A3A3", 400: "#C46E6E", 500: "#A83D3D",
-          600: "#8A2E2E", 700: "#6E2323", 800: "#521A1A", 900: "#3A1212",
+          300: withOpacity('--red-300'), 400: withOpacity('--red-400'), 500: withOpacity('--red-500'),
+          600: withOpacity('--red-600'), 700: withOpacity('--red-700'), 800: withOpacity('--red-800'), 900: withOpacity('--red-900'),
         },
 
         // The app previously used a different neon hue per feature card
@@ -67,15 +97,15 @@ export default {
         // manila (primary/neutral), filed-green (positive), rust (caution)
         // — so every card reads as "the same filing system", not a rainbow
         // of unrelated brand colors.
-        pink:    { 300: "#D9BFA3", 400: "#C49A6E", 500: "#B08356", 600: "#8B6A3F", 700: "#6B4F2C" },
-        indigo:  { 300: "#C9BBA3", 400: "#A68C63", 500: "#8B6A3F", 600: "#6B4F2C", 700: "#523D22" },
-        violet:  { 300: "#C4B29A", 400: "#9C7E52", 500: "#7D6136", 600: "#6B4F2C" },
-        cyan:    { 300: "#B7A98C", 400: "#8C7F68", 500: "#8B6A3F", 600: "#6B4F2C", 700: "#523D22" },
-        sky:     { 400: "#8C7F68", 500: "#8B6A3F", 600: "#6B4F2C" },
-        teal:    { 400: "#7A9683", 500: "#5C7A62", 600: "#3D5A45" },
-        emerald: { 300: "#A9C2AE", 400: "#7A9683", 500: "#5C7A62", 600: "#3D5A45", 700: "#2A4030" },
-        orange:  { 400: "#C08247", 500: "#A0632F", 600: "#824E24" },
-        amber:   { 400: "#C79A56", 500: "#A87A34", 600: "#8B6226" },
+        pink:    { 300: withOpacity('--pink-300'), 400: withOpacity('--pink-400'), 500: withOpacity('--pink-500'), 600: withOpacity('--pink-600'), 700: withOpacity('--pink-700') },
+        indigo:  { 300: withOpacity('--indigo-300'), 400: withOpacity('--indigo-400'), 500: withOpacity('--indigo-500'), 600: withOpacity('--indigo-600'), 700: withOpacity('--indigo-700') },
+        violet:  { 300: withOpacity('--violet-300'), 400: withOpacity('--violet-400'), 500: withOpacity('--violet-500'), 600: withOpacity('--violet-600') },
+        cyan:    { 300: withOpacity('--cyan-300'), 400: withOpacity('--cyan-400'), 500: withOpacity('--cyan-500'), 600: withOpacity('--cyan-600'), 700: withOpacity('--cyan-700') },
+        sky:     { 400: withOpacity('--sky-400'), 500: withOpacity('--sky-500'), 600: withOpacity('--sky-600') },
+        teal:    { 400: withOpacity('--teal-400'), 500: withOpacity('--teal-500'), 600: withOpacity('--teal-600') },
+        emerald: { 300: withOpacity('--emerald-300'), 400: withOpacity('--emerald-400'), 500: withOpacity('--emerald-500'), 600: withOpacity('--emerald-600'), 700: withOpacity('--emerald-700') },
+        orange:  { 400: withOpacity('--orange-400'), 500: withOpacity('--orange-500'), 600: withOpacity('--orange-600') },
+        amber:   { 400: withOpacity('--amber-400'), 500: withOpacity('--amber-500'), 600: withOpacity('--amber-600') },
       },
       animation: {
         'pulse-slow': 'pulse 4s cubic-bezier(0.4, 0, 0.6, 1) infinite',
