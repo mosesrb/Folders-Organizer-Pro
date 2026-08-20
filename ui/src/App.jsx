@@ -21,6 +21,7 @@ import {
   Save,
   Scissors,
   ShieldAlert,
+  ShieldCheck,
   Trash2,
   Wand2,
   PackageOpen,
@@ -122,6 +123,19 @@ const App = () => {
   const [zipSelected, setZipSelected] = useState([]); // folder names checked
   const [zipTargetExt, setZipTargetExt] = useState('.zip');
   const [zipDeleteOriginals, setZipDeleteOriginals] = useState(false);
+
+  // — Privacy Policy & Terms state —
+  const [hasAcceptedTerms, setHasAcceptedTerms] = useState(() => {
+    return localStorage.getItem('organizer-terms-accepted') === 'true';
+  });
+  const [showTermsModal, setShowTermsModal] = useState(!hasAcceptedTerms);
+  const [termsTab, setTermsTab] = useState('privacy'); // 'privacy' | 'terms'
+
+  const handleAcceptTerms = () => {
+    localStorage.setItem('organizer-terms-accepted', 'true');
+    setHasAcceptedTerms(true);
+    setShowTermsModal(false);
+  };
 
   // — Progress listener —
   useEffect(() => {
@@ -1273,14 +1287,14 @@ const App = () => {
            ))}
         </nav>
 
-        <div className="p-6 border-t border-slate-300">
+        <div className="p-4 border-t border-slate-300 space-y-2">
            <div className="flex items-center gap-3 p-3 bg-card rounded-md border border-slate-300">
               <div className="w-10 h-10 rounded-full bg-slate-200 border border-slate-300 flex items-center justify-center">
                  <Settings className="w-5 h-5 text-slate-500" />
               </div>
               <div className="flex-1 min-w-0">
                  <div className="text-[10px] font-bold text-ink truncate uppercase tracking-widest">Folders Organizer Pro</div>
-                 <div className="text-[10px] text-slate-500 truncate">Local desktop build · v5</div>
+                 <div className="text-[10px] text-slate-500 truncate">Local desktop build · v5.0.4</div>
               </div>
               <button
                 onClick={toggleTheme}
@@ -1291,6 +1305,15 @@ const App = () => {
                 {theme === 'dark' ? <Sun className="w-4 h-4 text-amber-500" /> : <Moon className="w-4 h-4 text-slate-600" />}
               </button>
            </div>
+
+           <button
+             onClick={() => { setTermsTab('privacy'); setShowTermsModal(true); }}
+             aria-label="View Privacy Policy and Terms of Use"
+             className="w-full py-2 px-3 flex items-center justify-center gap-2 text-[10px] font-bold uppercase tracking-wider text-slate-600 hover:text-ink bg-secondary/50 hover:bg-secondary border border-slate-300 rounded-md transition-colors"
+           >
+             <ShieldCheck className="w-3.5 h-3.5 text-primary" />
+             <span>Privacy & Terms</span>
+           </button>
         </div>
       </aside>
 
@@ -1500,6 +1523,170 @@ const App = () => {
             <div className="flex gap-4">
               <button autoFocus onClick={() => setConfirmDialog(null)} aria-label="Cancel this operation" className="flex-1 py-3 bg-secondary border border-slate-300 text-ink rounded-md text-xs font-black uppercase tracking-widest hover:bg-slate-200 transition-all">Cancel</button>
               <button onClick={confirmDialog.onConfirm} aria-label="Confirm and proceed" className="flex-1 py-3 bg-amber-600 text-on-amber rounded-md text-xs font-black uppercase tracking-widest hover:bg-amber-500 transition-all" style={{ boxShadow: '1px 2px 0 rgba(31,27,22,0.2)' }}>Proceed</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Privacy Policy & Terms Modal (First-Run & On-Demand) ── */}
+      {showTermsModal && (
+        <div role="dialog" aria-modal="true" aria-labelledby="terms-dialog-title" className="fixed inset-0 bg-ink/75 backdrop-blur-sm flex items-center justify-center z-[250] p-4 md:p-8">
+          <div className="w-full max-w-2xl max-h-[85vh] bg-card border border-slate-300 rounded-2xl p-6 md:p-8 shadow-[3px_5px_0_rgba(31,27,22,0.15)] flex flex-col gap-5">
+            {/* Header */}
+            <div className="flex items-start justify-between gap-4 border-b border-slate-200 pb-4">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-xl bg-primary/10 border border-primary/30 flex items-center justify-center shrink-0">
+                  <ShieldCheck className="w-5 h-5 text-primary" />
+                </div>
+                <div>
+                  <h2 id="terms-dialog-title" className="text-lg font-black text-ink font-serif leading-tight">
+                    Privacy Guarantee & Terms of Use
+                  </h2>
+                  <p className="text-xs text-slate-500 mt-0.5">
+                    Folders Organizer Pro is 100% local, offline, and open-source.
+                  </p>
+                </div>
+              </div>
+              {hasAcceptedTerms && (
+                <button
+                  onClick={() => setShowTermsModal(false)}
+                  aria-label="Close"
+                  className="w-8 h-8 rounded-full hover:bg-secondary flex items-center justify-center text-slate-500 hover:text-ink transition-colors"
+                >
+                  ✕
+                </button>
+              )}
+            </div>
+
+            {/* Tab Selector */}
+            <div className="flex gap-2 p-1 bg-secondary/70 border border-slate-300 rounded-lg shrink-0">
+              <button
+                onClick={() => setTermsTab('privacy')}
+                className={`flex-1 py-2 px-3 rounded-md text-xs font-bold transition-all flex items-center justify-center gap-2 ${
+                  termsTab === 'privacy'
+                    ? 'bg-card text-primary shadow-[1px_1px_0_rgba(31,27,22,0.1)] border border-slate-300'
+                    : 'text-slate-600 hover:text-ink'
+                }`}
+              >
+                <ShieldCheck className="w-4 h-4" />
+                <span>Privacy Policy (100% Local)</span>
+              </button>
+              <button
+                onClick={() => setTermsTab('terms')}
+                className={`flex-1 py-2 px-3 rounded-md text-xs font-bold transition-all flex items-center justify-center gap-2 ${
+                  termsTab === 'terms'
+                    ? 'bg-card text-primary shadow-[1px_1px_0_rgba(31,27,22,0.1)] border border-slate-300'
+                    : 'text-slate-600 hover:text-ink'
+                }`}
+              >
+                <FileText className="w-4 h-4" />
+                <span>Terms of Use & Disclaimer</span>
+              </button>
+            </div>
+
+            {/* Tab Content */}
+            <div className="flex-1 overflow-y-auto custom-scrollbar pr-2 space-y-3 text-xs leading-relaxed text-ink-soft">
+              {termsTab === 'privacy' ? (
+                <>
+                  <div className="p-3.5 bg-emerald-500/10 border border-emerald-500/20 rounded-xl space-y-1">
+                    <div className="font-bold text-emerald-700 flex items-center gap-2">
+                      <span className="text-sm">🛡️</span> Zero Data Collection & 100% Local
+                    </div>
+                    <p className="text-slate-600 text-[11px]">
+                      Folders Organizer Pro does not collect, track, or transmit any personal data, file contents, or device information.
+                    </p>
+                  </div>
+
+                  <div className="p-3.5 bg-secondary/40 border border-slate-200 rounded-xl space-y-1">
+                    <div className="font-bold text-ink flex items-center gap-2">
+                      <span className="text-sm">🚫</span> No Telemetry, Analytics, or Network Calls
+                    </div>
+                    <p className="text-slate-600 text-[11px]">
+                      The application functions entirely offline without external API connections, telemetry daemons, tracking pixels, or advertisements.
+                    </p>
+                  </div>
+
+                  <div className="p-3.5 bg-secondary/40 border border-slate-200 rounded-xl space-y-1">
+                    <div className="font-bold text-ink flex items-center gap-2">
+                      <span className="text-sm">📂</span> Strict Local Filesystem Access
+                    </div>
+                    <p className="text-slate-600 text-[11px]">
+                      File scanning, hashing, renaming, and conversions happen solely within the directories you explicitly open. Nothing leaves your PC.
+                    </p>
+                  </div>
+
+                  <div className="p-3.5 bg-secondary/40 border border-slate-200 rounded-xl space-y-1">
+                    <div className="font-bold text-ink flex items-center gap-2">
+                      <span className="text-sm">💾</span> Local Undo Snapshots
+                    </div>
+                    <p className="text-slate-600 text-[11px]">
+                      The <code className="bg-secondary px-1 py-0.5 rounded border border-slate-300">.organizer_history.json</code> file is stored strictly in your organized workspace folder for rollback purposes.
+                    </p>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div className="p-3.5 bg-primary/10 border border-primary/20 rounded-xl space-y-1">
+                    <div className="font-bold text-primary flex items-center gap-2">
+                      <span className="text-sm">⚖️</span> GPLv3 Open Source License
+                    </div>
+                    <p className="text-slate-600 text-[11px]">
+                      Folders Organizer Pro is free and open-source software under the GNU General Public License v3.
+                    </p>
+                  </div>
+
+                  <div className="p-3.5 bg-secondary/40 border border-slate-200 rounded-xl space-y-1">
+                    <div className="font-bold text-ink flex items-center gap-2">
+                      <span className="text-sm">🛡️</span> User Responsibility & Backups
+                    </div>
+                    <p className="text-slate-600 text-[11px]">
+                      You are responsible for your data. We strongly recommend maintaining regular backups and testing batch tasks with <strong>Simulation Mode (Dry Run)</strong> first.
+                    </p>
+                  </div>
+
+                  <div className="p-3.5 bg-secondary/40 border border-slate-200 rounded-xl space-y-1">
+                    <div className="font-bold text-ink flex items-center gap-2">
+                      <span className="text-sm">🔒</span> Built-in Safety Nets
+                    </div>
+                    <p className="text-slate-600 text-[11px]">
+                      Includes system-critical folder guards (<code className="bg-secondary px-1 py-0.5 rounded border border-slate-300">C:\Windows</code>, Program Files), Recycle Bin deletion (<code className="bg-secondary px-1 py-0.5 rounded border border-slate-300">send2trash</code>), and atomic undo history.
+                    </p>
+                  </div>
+
+                  <div className="p-3.5 bg-amber-500/10 border border-amber-500/20 rounded-xl space-y-1">
+                    <div className="font-bold text-amber-700 flex items-center gap-2">
+                      <span className="text-sm">⚠️</span> Disclaimer of Warranty (AS-IS)
+                    </div>
+                    <p className="text-slate-600 text-[11px]">
+                      Provided "AS IS", without warranty of any kind. Authors are not liable for accidental data loss resulting from filesystem operations.
+                    </p>
+                  </div>
+                </>
+              )}
+            </div>
+
+            {/* Footer Action */}
+            <div className="pt-3 border-t border-slate-200 flex flex-col gap-2">
+              {!hasAcceptedTerms ? (
+                <>
+                  <button
+                    onClick={handleAcceptTerms}
+                    className="w-full py-3.5 bg-primary text-white rounded-md text-xs font-black uppercase tracking-widest hover:bg-primary/90 transition-all shadow-[1px_2px_0_rgba(31,27,22,0.2)] active:scale-[0.99]"
+                  >
+                    Accept & Continue
+                  </button>
+                  <p className="text-[10px] text-center text-slate-500">
+                    By clicking Accept & Continue, you acknowledge and agree to these local terms.
+                  </p>
+                </>
+              ) : (
+                <button
+                  onClick={() => setShowTermsModal(false)}
+                  className="w-full py-2.5 bg-secondary text-ink border border-slate-300 rounded-md text-xs font-bold uppercase tracking-wider hover:bg-slate-200 transition-all"
+                >
+                  Close
+                </button>
+              )}
             </div>
           </div>
         </div>

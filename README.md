@@ -172,6 +172,9 @@ Folders-Organizer-Pro/
 │   ├── file_service.py       # Workspace scanning & folder analytics
 │   ├── media_service.py      # Audio, image, and PDF processing
 │   └── organizer_service.py  # Sorting, flattening, and renaming engine
+├── LICENSE                  # GNU General Public License v3
+├── PRIVACY.md               # 100% local privacy policy guarantee
+├── TERMS.md                 # Terms of use, safety guidelines & disclaimer
 ├── tests/                   # Unit test suite
 │   └── test_services.py     # Backend service and safety guard tests
 └── ui/                      # React frontend
@@ -181,6 +184,13 @@ Folders-Organizer-Pro/
         ├── App.jsx          # Main application UI and view components
         └── index.css        # CSS variables for light/dark themes
 ```
+
+---
+
+## Privacy & Terms
+
+- **Privacy Guarantee**: Folders Organizer Pro is 100% local and offline. It does not collect, transmit, or store any personal data or file telemetry. See [PRIVACY.md](PRIVACY.md).
+- **Terms & Disclaimer**: See [TERMS.md](TERMS.md) for full terms, user responsibilities, and AS-IS warranty disclaimers under GPLv3.
 
 ---
 
