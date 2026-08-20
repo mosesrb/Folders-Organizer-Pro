@@ -66,6 +66,10 @@ BACKUP/
 # Internal Documentation
 docs/architecture.md
 docs/memories.md
+docs/worklogs.md
+docs/project-status.md
+docs/project status.md
+docs/Universal_Software_Audit_Prompt.md
 
 # Local build tools
 inno_setup_bin/
