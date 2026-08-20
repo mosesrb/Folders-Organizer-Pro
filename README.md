@@ -135,9 +135,8 @@ Folders-Organizer-Pro/
 ├── setup.bat                # Automated setup and build script
 ├── Start Organizer.bat      # Application launcher script
 ├── branding/                # SVG source assets and icon files
-├── docs/                    # Architecture and design documentation
-│   ├── architecture.md      # Detailed system architecture
-│   └── memories.md          # Technical changelog and implementation decisions
+├── docs/                    # UI screenshots and project documentation
+│   └── assets/              # Interface screenshots
 ├── services/                # Backend business logic
 │   ├── automation_service.py # Cleanup, backups, and batch zipping
 │   ├── duplicate_service.py  # Content hashing & duplicate management
