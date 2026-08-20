@@ -1,3 +1,4 @@
+import sys
 import os
 import shutil
 import webview
@@ -7,6 +8,14 @@ import threading
 from functools import wraps
 from pathlib import Path, PureWindowsPath
 from typing import List, Dict
+
+def get_base_dir() -> Path:
+    """Returns the base directory of the application.
+    Supports PyInstaller bundle directory (sys._MEIPASS) as well as regular source execution.
+    """
+    if getattr(sys, 'frozen', False):
+        return Path(getattr(sys, '_MEIPASS', sys.executable)).resolve()
+    return Path(__file__).resolve().parent
 
 # Import refactored services
 from services import file_service, duplicate_service, organizer_service, automation_service, media_service
@@ -847,7 +856,7 @@ class OrganizerAPI:
 
 def start_app():
     api = OrganizerAPI()
-    base_dir = Path(__file__).parent
+    base_dir = get_base_dir()
     dist_path = base_dir / 'ui' / 'dist' / 'index.html'
     icon_path = base_dir / 'icon.ico'
     url = dist_path.absolute().as_uri() if dist_path.exists() else 'http://localhost:5173'

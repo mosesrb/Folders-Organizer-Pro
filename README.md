@@ -126,11 +126,40 @@ python -m unittest tests.test_services
 
 ---
 
+## Packaging & Distribution
+
+You can package Folders Organizer Pro as a standalone portable Windows `.exe` or as a full Windows Setup installer (`Setup.exe`).
+
+### 1. Standalone Portable Executable
+To build a single, zero-installation `.exe` with all dependencies and UI assets embedded:
+```cmd
+build_portable.bat
+```
+Output binary: `dist/FoldersOrganizerPro_Portable.exe`
+
+### 2. Windows Setup Installer
+To build a standard Windows Setup wizard with Start Menu and Desktop shortcuts:
+1. Ensure [Inno Setup 6](https://jrsoftware.org/isdl.php) is installed.
+2. Run:
+   ```cmd
+   build_installer.bat
+   ```
+Output installer: `dist/FoldersOrganizerPro_Setup.exe`
+
+*(Or run `build_all.bat` to build both binaries in a single run).*
+
+---
+
 ## Repository Structure
 
 ```
 Folders-Organizer-Pro/
 ├── organizer.py             # PyWebView application entrypoint & API bridge
+├── FoldersOrganizerPro.spec # PyInstaller standalone build configuration
+├── installer.iss            # Inno Setup Windows installer configuration
+├── build_portable.bat       # One-click portable .exe build script
+├── build_installer.bat      # One-click Windows Setup installer script
+├── build_all.bat            # Full build pipeline script
 ├── requirements.txt         # Python dependencies
 ├── setup.bat                # Automated setup and build script
 ├── Start Organizer.bat      # Application launcher script
