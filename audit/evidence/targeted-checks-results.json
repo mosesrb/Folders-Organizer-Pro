@@ -1,0 +1,39 @@
+{
+  "double_lock_deadlock": {
+    "completed_within_1s": false,
+    "result": []
+  },
+  "untrusted_history_external_delete": {
+    "victim_was_inside_disposable_temp_root": true,
+    "victim_was_outside_workspace": true,
+    "victim_exists_after_undo": false,
+    "api_reported_success": true
+  },
+  "custom_rule_workspace_escape": {
+    "escaped_target_is_outside_workspace": true,
+    "source_still_exists": false,
+    "escaped_file_exists": true,
+    "api_reported_success": true
+  },
+  "flatten_collision_overwrite": {
+    "api_reported_success": true,
+    "preexisting_collision_content_after": "nested-beta",
+    "expected_sentinel_content_survived": false
+  },
+  "media_fallback_overwrite": {
+    "conversion_reported_error": false,
+    "preexisting_fallback_content_was_overwritten": true
+  },
+  "extension_partial_failure_history": {
+    "api_reported_success": false,
+    "first_source_still_exists": false,
+    "first_destination_exists": true,
+    "history_entries_retained": 0,
+    "history_file_exists": false
+  },
+  "extended_drive_root_guard": {
+    "extended_namespace_drive_root": "\\\\?\\C:\\",
+    "reported_system_critical": false
+  }
+}
+

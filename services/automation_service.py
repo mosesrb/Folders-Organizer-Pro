@@ -24,8 +24,10 @@ try:
 except ImportError:
     rarfile = None
 
+import uuid
 from pathlib import Path
-from .file_service import safe_dest as _safe_dest
+from .file_service import safe_dest as _safe_dest, allocate_unique_destination
+from .path_guard import validate_workspace, validate_source, validate_destination, PathSecurityError
 
 # Protected system extensions/names — never touch these during cleanup
 _PROTECTED_EXTS = {'.lnk', '.ini', '.sys', '.inf', '.dll', '.icl', '.theme'}
@@ -177,27 +179,39 @@ def cleanup_old_files(path: str, days: int, dry_run: bool, progress_callback, re
 # 4. Batch Unzipper
 # ──────────────────────────────────────────────
 
+# Archive Quota Limits & Windows Reserved Device Names (FOP-AUD-012)
+MAX_ARCHIVE_MEMBERS = 10_000
+MAX_EXPANDED_BYTES = 5 * 1024 * 1024 * 1024  # 5 GB limit
+MAX_COMPRESSION_RATIO = 100  # 100:1 ratio limit
+MAX_DIRECTORY_DEPTH = 20
+MIN_FREE_DISK_SPACE_BUFFER = 50 * 1024 * 1024  # 50 MB safety margin
+
+WINDOWS_RESERVED_NAMES = {
+    'CON', 'PRN', 'AUX', 'NUL',
+    'COM1', 'COM2', 'COM3', 'COM4', 'COM5', 'COM6', 'COM7', 'COM8', 'COM9',
+    'LPT1', 'LPT2', 'LPT3', 'LPT4', 'LPT5', 'LPT6', 'LPT7', 'LPT8', 'LPT9'
+}
+
+
 class ArchiveSecurityError(Exception):
     """Raised when an archive contains a member that would escape the
-    intended extraction directory (a.k.a. "zip slip" / path traversal)."""
+    intended extraction directory, violate quotas, or use forbidden links."""
     pass
 
 
 def _assert_member_is_safe(member_name: str, out_dir: Path) -> Path:
     """Resolves a member's target path and verifies it stays inside out_dir.
-    Rejects absolute paths, '..' traversal, and (on Windows) drive-letter
-    or UNC prefixes embedded in the member name.
+    Rejects absolute paths, '..' traversal, Windows drive-letter / UNC prefixes,
+    null bytes, reserved DOS device names, and excessive nesting depth.
     """
-    # A bare '.' or empty name just refers to the extraction root itself —
-    # harmless, and produced by very common tools (e.g. Python's tarfile
-    # strips the trailing slash from a directory entry, so the standard
-    # `tar -C dir -cf out.tar .` produces a literal '.' member). The real
-    # containment check below already handles it correctly (resolves to
-    # out_dir, passes) and already independently catches '..' (resolves
-    # outside out_dir, fails relative_to) — so only '..' needs rejecting
-    # here explicitly, as a clear, fast-path safety net.
-    if member_name and member_name.strip() == '..':
+    if not member_name:
+        return out_dir
+
+    if member_name.strip() == '..':
         raise ArchiveSecurityError(f"Unsafe archive entry name: {member_name!r}")
+
+    if '\x00' in member_name:
+        raise ArchiveSecurityError("Archive entry contains forbidden null byte")
 
     # Reject absolute paths / drive letters outright before any join.
     raw = member_name.replace('\\', '/')
@@ -208,46 +222,237 @@ def _assert_member_is_safe(member_name: str, out_dir: Path) -> Path:
     target = (out_dir / member_name).resolve(strict=False)
 
     try:
-        target.relative_to(out_dir_resolved)
+        rel = target.relative_to(out_dir_resolved)
     except ValueError:
         raise ArchiveSecurityError(
             f"Archive entry '{member_name}' would extract outside the target folder — blocked."
         )
+
+    # Check nesting depth limit (FOP-AUD-012)
+    if len(rel.parts) > MAX_DIRECTORY_DEPTH:
+        raise ArchiveSecurityError(
+            f"Archive entry '{member_name}' nesting depth ({len(rel.parts)}) exceeds limit of {MAX_DIRECTORY_DEPTH}"
+        )
+
+    # Reject Windows reserved device names in any path segment
+    for part in rel.parts:
+        base = part.split('.')[0].upper()
+        if base in WINDOWS_RESERVED_NAMES:
+            raise ArchiveSecurityError(f"Archive entry contains reserved device name: {part}")
+
     return target
 
 
+def _check_disk_space(target_dir: Path, required_bytes: int):
+    """Verifies that the target filesystem has sufficient free space."""
+    try:
+        check_path = target_dir if target_dir.exists() else target_dir.parent
+        usage = shutil.disk_usage(str(check_path))
+        if usage.free < required_bytes + MIN_FREE_DISK_SPACE_BUFFER:
+            raise ArchiveSecurityError(
+                f"Insufficient disk space: required {required_bytes} bytes (+50MB safety buffer), available {usage.free} bytes"
+            )
+    except OSError:
+        pass
+
+
+class ArchiveQuotaTracker:
+    """Tracks extraction metrics and enforces expansion quotas to defeat archive/zip bombs."""
+    def __init__(self, archive_size: int, max_bytes: int = MAX_EXPANDED_BYTES, max_ratio: int = MAX_COMPRESSION_RATIO):
+        self.archive_size = max(1, archive_size)
+        self.max_bytes = max_bytes
+        self.max_ratio = max_ratio
+        self.total_extracted = 0
+
+    def add_bytes(self, num_bytes: int):
+        self.total_extracted += num_bytes
+        if self.total_extracted > self.max_bytes:
+            raise ArchiveSecurityError(
+                f"Archive exceeded maximum expansion limit of {self.max_bytes} bytes (decompression bomb protection)"
+            )
+        # Check compression ratio only once significant bytes (>1MB) have been decompressed
+        if self.total_extracted > 1_000_000 and (self.total_extracted / self.archive_size) > self.max_ratio:
+            raise ArchiveSecurityError(
+                f"Archive compression ratio ({self.total_extracted / self.archive_size:.1f}:1) exceeded safety limit of {self.max_ratio}:1"
+            )
+
+
 def _safe_extract_zip(zf_path: str, out_dir: Path):
+    zf_file = Path(zf_path)
+    archive_size = zf_file.stat().st_size
+    tracker = ArchiveQuotaTracker(archive_size)
+
     with zipfile.ZipFile(zf_path, 'r') as archive:
-        for info in archive.infolist():
-            _assert_member_is_safe(info.filename, out_dir)
-        archive.extractall(path=str(out_dir))
+        members = archive.infolist()
+        if len(members) > MAX_ARCHIVE_MEMBERS:
+            raise ArchiveSecurityError(
+                f"Archive member count ({len(members)}) exceeds limit of {MAX_ARCHIVE_MEMBERS}"
+            )
+
+        declared_total = sum(info.file_size for info in members)
+        if declared_total > MAX_EXPANDED_BYTES:
+            raise ArchiveSecurityError(
+                f"Declared uncompressed size ({declared_total} bytes) exceeds limit of {MAX_EXPANDED_BYTES} bytes"
+            )
+
+        if declared_total > 1_000_000 and (declared_total / max(1, archive_size)) > MAX_COMPRESSION_RATIO:
+            raise ArchiveSecurityError(
+                f"Archive compression ratio ({declared_total / archive_size:.1f}:1) exceeds limit of {MAX_COMPRESSION_RATIO}:1"
+            )
+
+        _check_disk_space(out_dir, declared_total)
+
+        for info in members:
+            # Reject symlinks in zip (POSIX symlink attribute in upper 16 bits)
+            mode = info.external_attr >> 16
+            if (mode & 0o170000) == 0o120000:
+                raise ArchiveSecurityError(f"Symlinks are not allowed in zip archives: {info.filename}")
+
+            target = _assert_member_is_safe(info.filename, out_dir)
+
+            if info.is_dir():
+                target.mkdir(parents=True, exist_ok=True)
+            else:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with archive.open(info, 'r') as src, target.open('wb') as dst:
+                    while True:
+                        chunk = src.read(65536)
+                        if not chunk:
+                            break
+                        tracker.add_bytes(len(chunk))
+                        dst.write(chunk)
 
 
 def _safe_extract_tar(tf_path: str, out_dir: Path):
+    tf_file = Path(tf_path)
+    archive_size = tf_file.stat().st_size
+    tracker = ArchiveQuotaTracker(archive_size)
+
     with tarfile.open(tf_path, 'r:*') as archive:
-        for member in archive.getmembers():
-            _assert_member_is_safe(member.name, out_dir)
-            # Reject symlinks/hardlinks that point outside out_dir too.
+        members = archive.getmembers()
+        if len(members) > MAX_ARCHIVE_MEMBERS:
+            raise ArchiveSecurityError(
+                f"Archive member count ({len(members)}) exceeds limit of {MAX_ARCHIVE_MEMBERS}"
+            )
+
+        declared_total = sum(m.size for m in members if m.isreg())
+        if declared_total > MAX_EXPANDED_BYTES:
+            raise ArchiveSecurityError(
+                f"Declared uncompressed size ({declared_total} bytes) exceeds limit of {MAX_EXPANDED_BYTES} bytes"
+            )
+
+        if declared_total > 1_000_000 and (declared_total / max(1, archive_size)) > MAX_COMPRESSION_RATIO:
+            raise ArchiveSecurityError(
+                f"Archive compression ratio ({declared_total / archive_size:.1f}:1) exceeds limit of {MAX_COMPRESSION_RATIO}:1"
+            )
+
+        _check_disk_space(out_dir, declared_total)
+
+        out_dir_resolved = out_dir.resolve(strict=False)
+        for member in members:
+            # Reject special device nodes / FIFOs
+            if member.isdev() or member.ischr() or member.isblk() or member.isfifo():
+                raise ArchiveSecurityError(f"Special device nodes are not permitted: {member.name}")
+
+            target = _assert_member_is_safe(member.name, out_dir)
+
+            # Check links
             if member.issym() or member.islnk():
-                _assert_member_is_safe(member.linkname, out_dir)
-        try:
-            archive.extractall(path=str(out_dir), filter='data')
-        except TypeError:
-            archive.extractall(path=str(out_dir))
+                link_target = (out_dir / member.name).parent / member.linkname
+                try:
+                    link_target.resolve(strict=False).relative_to(out_dir_resolved)
+                except ValueError:
+                    raise ArchiveSecurityError(f"Link target escapes destination directory: {member.linkname}")
+                raise ArchiveSecurityError(f"Symlinks and hardlinks are not allowed in tar archives: {member.name}")
+
+            if member.isdir():
+                target.mkdir(parents=True, exist_ok=True)
+            elif member.isreg():
+                target.parent.mkdir(parents=True, exist_ok=True)
+                f_in = archive.extractfile(member)
+                if f_in is not None:
+                    with f_in, target.open('wb') as dst:
+                        while True:
+                            chunk = f_in.read(65536)
+                            if not chunk:
+                                break
+                            tracker.add_bytes(len(chunk))
+                            dst.write(chunk)
 
 
 def _safe_extract_7z(zf_path: str, out_dir: Path):
+    zf_file = Path(zf_path)
+    archive_size = zf_file.stat().st_size
+
     with py7zr.SevenZipFile(zf_path, mode='r') as archive:
-        for name in archive.getnames():
-            _assert_member_is_safe(name, out_dir)
+        files = archive.files
+        if len(files) > MAX_ARCHIVE_MEMBERS:
+            raise ArchiveSecurityError(
+                f"Archive member count ({len(files)}) exceeds limit of {MAX_ARCHIVE_MEMBERS}"
+            )
+
+        declared_total = sum(f.uncompressed or 0 for f in files)
+        if declared_total > MAX_EXPANDED_BYTES:
+            raise ArchiveSecurityError(
+                f"Declared uncompressed size ({declared_total} bytes) exceeds limit of {MAX_EXPANDED_BYTES} bytes"
+            )
+
+        if declared_total > 1_000_000 and (declared_total / max(1, archive_size)) > MAX_COMPRESSION_RATIO:
+            raise ArchiveSecurityError(
+                f"Archive compression ratio ({declared_total / archive_size:.1f}:1) exceeds limit of {MAX_COMPRESSION_RATIO}:1"
+            )
+
+        _check_disk_space(out_dir, declared_total)
+
+        for f in files:
+            if getattr(f, 'is_symlink', False):
+                raise ArchiveSecurityError(f"Symlinks are not allowed in 7z archives: {f.filename}")
+            _assert_member_is_safe(f.filename, out_dir)
+
         archive.extractall(path=str(out_dir))
 
 
 def _safe_extract_rar(zf_path: str, out_dir: Path):
+    zf_file = Path(zf_path)
+    archive_size = zf_file.stat().st_size
+    tracker = ArchiveQuotaTracker(archive_size)
+
     with rarfile.RarFile(zf_path) as archive:
-        for name in archive.namelist():
-            _assert_member_is_safe(name, out_dir)
-        archive.extractall(path=str(out_dir))
+        members = archive.infolist()
+        if len(members) > MAX_ARCHIVE_MEMBERS:
+            raise ArchiveSecurityError(
+                f"Archive member count ({len(members)}) exceeds limit of {MAX_ARCHIVE_MEMBERS}"
+            )
+
+        declared_total = sum(info.file_size for info in members)
+        if declared_total > MAX_EXPANDED_BYTES:
+            raise ArchiveSecurityError(
+                f"Declared uncompressed size ({declared_total} bytes) exceeds limit of {MAX_EXPANDED_BYTES} bytes"
+            )
+
+        if declared_total > 1_000_000 and (declared_total / max(1, archive_size)) > MAX_COMPRESSION_RATIO:
+            raise ArchiveSecurityError(
+                f"Archive compression ratio ({declared_total / archive_size:.1f}:1) exceeds limit of {MAX_COMPRESSION_RATIO}:1"
+            )
+
+        _check_disk_space(out_dir, declared_total)
+
+        for info in members:
+            if info.is_symlink():
+                raise ArchiveSecurityError(f"Symlinks are not allowed in RAR archives: {info.filename}")
+            target = _assert_member_is_safe(info.filename, out_dir)
+
+            if info.isdir():
+                target.mkdir(parents=True, exist_ok=True)
+            else:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with archive.open(info) as src, target.open('wb') as dst:
+                    while True:
+                        chunk = src.read(65536)
+                        if not chunk:
+                            break
+                        tracker.add_bytes(len(chunk))
+                        dst.write(chunk)
 
 
 def batch_unzip(path: str, dry_run: bool, progress_callback, recursive: bool = False) -> tuple:
@@ -265,9 +470,10 @@ def batch_unzip(path: str, dry_run: bool, progress_callback, recursive: bool = F
 
     history = []
     errors = []
+    reserved_dests: set[Path] = set()
     for idx, zf in enumerate(archives):
         # Use collision-safe destination, sibling to the archive itself
-        out_dir = _safe_dest(zf.parent, zf.stem)
+        out_dir = allocate_unique_destination(zf.parent / zf.stem, reserved=reserved_dests)
         
         if not dry_run:
             try:
@@ -399,19 +605,11 @@ def additive_backup(src: str, dest: str, dry_run: bool, progress_callback) -> tu
     - Source file is newer than dest file.
     Never deletes from dest.
     """
-    src_p = Path(src).resolve()
-    dest_p = Path(dest).resolve()
-
-    # If dest lives inside src, re-running this (an "additive"/incremental
-    # operation meant to be repeated) copies each prior run's own output
-    # back into itself, nesting one level deeper every time with no
-    # stopping point — e.g. a 'backup' folder created inside the project
-    # it's backing up turns into backup/backup/backup/... forever.
-    if dest_p == src_p or dest_p in src_p.parents or src_p in dest_p.parents:
-        raise ValueError(
-            "The backup destination can't be inside (or the same as) the source folder — "
-            "that would make every future backup copy itself into itself. Choose a destination outside the source."
-        )
+    try:
+        src_p = validate_workspace(src)
+        dest_p = validate_destination(dest, src_p, allow_sibling=True)
+    except PathSecurityError as e:
+        raise ValueError(str(e))
 
     candidates = []
     for f in src_p.rglob('*'):
@@ -473,22 +671,27 @@ def batch_zip_folders(path: str, folder_names: list, target_ext: str, delete_ori
     history/undo; the Recycle Bin is what makes the deletion recoverable
     (the app's undo history doesn't reverse folder deletions).
     """
-    p = Path(path)
+    p = validate_workspace(path)
     if not target_ext.startswith('.'):
         target_ext = '.' + target_ext
 
     targets = []
+    errors = []
     for name in folder_names:
-        folder = p / name
-        if folder.is_dir():
-            targets.append(folder)
+        try:
+            folder = validate_source(p / name, p)
+            if folder.is_dir():
+                targets.append(folder)
+            else:
+                errors.append(f"{name}: not a directory.")
+        except PathSecurityError as e:
+            errors.append(f"{name}: blocked for safety: {e}")
 
     if not targets:
-        return [], 0, []
+        return [], 0, errors
 
     total = len(targets)
     history = []
-    errors = []
 
     for idx, folder in enumerate(targets):
         archive_path = folder.parent / f"{folder.name}{target_ext}"
@@ -508,10 +711,9 @@ def batch_zip_folders(path: str, folder_names: list, target_ext: str, delete_ori
                 tmp_zip.replace(archive_path)
                 history.append({"action": "create", "src": str(folder), "dst": str(archive_path)})
                 if delete_originals:
-                    if send2trash:
-                        send2trash.send2trash(str(folder))
-                    else:
-                        shutil.rmtree(folder)
+                    if send2trash is None:
+                        raise RuntimeError("Recycle Bin service (send2trash) is not available. Deletion blocked.")
+                    send2trash.send2trash(str(folder))
                     history.append({"action": "delete", "src": str(folder), "dst": ""})
             except Exception as e:
                 errors.append(f"{folder.name}: {e}")
@@ -549,6 +751,17 @@ def convert_image_formats(path: str, source_exts: list, target_ext: str, dry_run
     if not target_ext.startswith('.'):
         target_ext = '.' + target_ext
 
+    pil_format_map = {
+        '.jpg': 'JPEG', '.jpeg': 'JPEG', '.png': 'PNG',
+        '.webp': 'WEBP', '.bmp': 'BMP', '.tiff': 'TIFF', '.gif': 'GIF'
+    }
+    if target_ext.lower() not in pil_format_map:
+        raise ValueError(f"Unsupported target image format: {target_ext}")
+    out_format = pil_format_map[target_ext.lower()]
+
+    if isinstance(source_exts, str):
+        source_exts = [x.strip() for x in source_exts.split(',') if x.strip()]
+
     # Normalize source extensions
     source_set = {(e if e.startswith('.') else f'.{e}').lower() for e in source_exts}
 
@@ -559,25 +772,45 @@ def convert_image_formats(path: str, source_exts: list, target_ext: str, dry_run
 
     total = len(files)
     history = []
-    pil_format_map = {
-        '.jpg': 'JPEG', '.jpeg': 'JPEG', '.png': 'PNG',
-        '.webp': 'WEBP', '.bmp': 'BMP', '.tiff': 'TIFF', '.gif': 'GIF'
-    }
-    out_format = pil_format_map.get(target_ext.lower(), target_ext.upper().lstrip('.'))
 
+    # FOP-AUD-008: Bounded resource limits and explicit format restrictions
+    MAX_IMAGE_PIXELS = 100_000_000
+    MAX_IMAGE_DIMENSION = 16384
+    ALLOWED_IMAGE_FORMATS = ["JPEG", "PNG", "WEBP", "BMP", "TIFF", "GIF"]
+    Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
+
+    reserved_dests: set[Path] = set()
     for idx, f in enumerate(files):
         new_name = f.stem + target_ext
-        new_path = _safe_dest(f.parent, new_name) if not dry_run else (f.parent / new_name)
+        new_path = allocate_unique_destination(f.parent / new_name, reserved=reserved_dests)
 
         if not dry_run:
+            tmp_path = f.parent / f".tmp_{uuid.uuid4().hex[:8]}_{new_path.name}"
             try:
-                img = Image.open(f)
-                # Convert RGBA → RGB for JPEG
-                if out_format == 'JPEG' and img.mode in ('RGBA', 'P'):
-                    img = img.convert('RGB')
-                img.save(new_path, out_format)
+                with Image.open(f, formats=ALLOWED_IMAGE_FORMATS) as img:
+                    width, height = img.size
+                    if width > MAX_IMAGE_DIMENSION or height > MAX_IMAGE_DIMENSION:
+                        raise ValueError(
+                            f"Image dimensions ({width}x{height}) exceed maximum allowed dimension of {MAX_IMAGE_DIMENSION}px"
+                        )
+                    if width * height > MAX_IMAGE_PIXELS:
+                        raise ValueError(
+                            f"Image pixel count ({width * height}) exceeds maximum allowed limit of {MAX_IMAGE_PIXELS} pixels"
+                        )
+
+                    # Convert RGBA → RGB for JPEG
+                    if out_format == 'JPEG' and img.mode in ('RGBA', 'P'):
+                        img = img.convert('RGB')
+                    img.save(tmp_path, out_format)
+
+                os.replace(str(tmp_path), str(new_path))
                 history.append({"action": "create", "src": str(f), "dst": str(new_path)})
             except Exception as e:
+                if tmp_path.exists():
+                    try:
+                        tmp_path.unlink()
+                    except OSError:
+                        pass
                 history.append({"action": "error", "src": str(f), "dst": f"ERROR: {e}"})
         else:
             history.append({"action": "create", "src": str(f), "dst": str(new_path)})

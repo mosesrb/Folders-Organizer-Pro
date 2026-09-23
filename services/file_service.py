@@ -2,6 +2,7 @@ import os
 import shutil
 import datetime
 from pathlib import Path
+from typing import Optional, Set
 
 def get_size_str(size_bytes: int) -> str:
     """Helper to format sizes."""
@@ -11,19 +12,58 @@ def get_size_str(size_bytes: int) -> str:
         size_bytes /= 1024
     return f"{size_bytes:.2f} PB"
 
-def safe_dest(target_dir: Path, filename: str) -> Path:
-    """Returns a collision-free destination path, appending _1, _2... as needed.
-    Single source of truth — previously duplicated in organizer_service.py and
-    automation_service.py.
-    """
-    stem = Path(filename).stem
-    suffix = Path(filename).suffix
-    dest = target_dir / filename
+class DestinationAllocator:
+    """Allocates collision-free destination paths, checking both filesystem existence
+    and destinations already reserved across the current batch operation (FOP-AUD-003)."""
+
+    def __init__(self, target_dir: Path):
+        self.target_dir = Path(target_dir)
+        self._reserved: set[Path] = set()
+
+    def allocate(self, filename: str) -> Path:
+        stem = Path(filename).stem
+        suffix = Path(filename).suffix
+        candidate = self.target_dir / filename
+        counter = 1
+        while candidate.exists() or candidate in self._reserved:
+            candidate = self.target_dir / f"{stem}_{counter}{suffix}"
+            counter += 1
+        self._reserved.add(candidate)
+        return candidate
+
+    def reserve(self, path: Path) -> None:
+        self._reserved.add(Path(path))
+
+    def is_reserved(self, path: Path) -> bool:
+        return Path(path) in self._reserved
+
+
+def allocate_unique_destination(target_path: Path, reserved: Optional[set[Path]] = None) -> Path:
+    """Finds a collision-free destination for target_path, appending _1, _2...
+    if target_path exists on disk or is present in reserved (FOP-AUD-005)."""
+    p = Path(target_path)
+    res = reserved if reserved is not None else set()
+    if not p.exists() and p not in res:
+        res.add(p)
+        return p
+
+    stem = p.stem
+    suffix = p.suffix
+    parent = p.parent
     counter = 1
-    while dest.exists():
-        dest = target_dir / f"{stem}_{counter}{suffix}"
+    candidate = parent / f"{stem}_{counter}{suffix}"
+    while candidate.exists() or candidate in res:
         counter += 1
-    return dest
+        candidate = parent / f"{stem}_{counter}{suffix}"
+
+    res.add(candidate)
+    return candidate
+
+
+def safe_dest(target_dir: Path, filename: str, reserved: Optional[set[Path]] = None) -> Path:
+    """Returns a collision-free destination path, appending _1, _2... as needed.
+    Respects existing files and optionally an in-memory reservation set."""
+    return allocate_unique_destination(Path(target_dir) / filename, reserved)
 
 def list_top_level_folders(path: str) -> list:
     """Returns the immediate subfolders of `path` with a quick item count

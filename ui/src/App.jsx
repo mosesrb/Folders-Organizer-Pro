@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   FolderOpen,
   Hash,
@@ -59,9 +59,45 @@ const LogoMark = ({ className }) => (
   </svg>
 );
 
+const DEFAULT_OPERATION_REGISTRY = {
+  undoable_ops: [
+    'sequential_rename', 'sort_by_date', 'smart_categorize', 'change_extensions',
+    'flatten_workspace', 'advanced_regex_rename', 'cleanup_old_files', 'archive_large_files',
+    'additive_backup', 'batch_unzip', 'batch_zip_folders', 'convert_image_formats',
+    'convert_mp3_to_wav', 'batch_convert_mp3_to_wav', 'compress_pdf', 'batch_compress_pdf',
+    'optimize_image', 'batch_optimize_images',
+  ],
+  destructive_ops: [
+    'sequential_rename', 'change_extensions', 'flatten_workspace', 'delete_duplicates',
+    'advanced_regex_rename', 'cleanup_old_files', 'archive_large_files', 'delete_empty_folders',
+    'batch_zip_folders', 'undo_last_operation',
+  ],
+  recursive_capable_ops: [
+    'advanced_regex_rename', 'cleanup_old_files', 'archive_large_files',
+    'batch_unzip', 'change_extensions', 'convert_image_formats',
+  ],
+  confirmation_required_ops: [
+    'sequential_rename', 'sort_by_date', 'smart_categorize', 'change_extensions',
+    'flatten_workspace', 'delete_duplicates', 'advanced_regex_rename', 'cleanup_old_files',
+    'archive_large_files', 'delete_empty_folders', 'additive_backup', 'batch_unzip',
+    'batch_zip_folders', 'convert_image_formats', 'batch_convert_mp3_to_wav',
+    'batch_compress_pdf', 'batch_optimize_images', 'undo_last_operation',
+  ],
+  dry_run_capable_ops: [
+    'sequential_rename', 'sort_by_date', 'smart_categorize', 'change_extensions',
+    'flatten_workspace', 'delete_duplicates', 'advanced_regex_rename', 'cleanup_old_files',
+    'archive_large_files', 'delete_empty_folders', 'additive_backup', 'batch_unzip',
+    'batch_zip_folders', 'convert_image_formats', 'batch_convert_mp3_to_wav',
+    'batch_compress_pdf', 'batch_optimize_images',
+  ],
+};
+
 const App = () => {
   // — Core state —
   const [path, setPath] = useState('');
+  const [opRegistry, setOpRegistry] = useState(DEFAULT_OPERATION_REGISTRY);
+  const workspaceTokenRef = useRef(0);
+  const isOperatingRef = useRef(false);
   const [prefix, setPrefix] = useState('Item_');
   const [oldExt, setOldExt] = useState('.zip');
   const [newExt, setNewExt] = useState('.cbr');
@@ -152,14 +188,101 @@ const App = () => {
 
   const toggleTheme = () => setTheme((t) => (t === 'dark' ? 'light' : 'dark'));
 
-  // — Auto-load stats + rules when path changes —
+  // — Operation Registry fetch —
   useEffect(() => {
-    if (path) {
-      refreshStats();
-      loadRules();
-      refreshMediaFiles();
-      loadZipFolders();
-    }
+    const fetchRegistry = async () => {
+      if (window.pywebview?.api?.get_operation_registry) {
+        try {
+          const res = await window.pywebview.api.get_operation_registry();
+          if (res?.success && res.registry) {
+            setOpRegistry(res.registry);
+          }
+        } catch (e) {
+          console.warn('Failed to load operation registry from backend:', e);
+        }
+      }
+    };
+    fetchRegistry();
+  }, []);
+
+  // — Auto-load workspace data when path changes, protected by request token —
+  useEffect(() => {
+    const currentToken = ++workspaceTokenRef.current;
+
+    // Immediately clear all workspace-scoped state (FOP-AUD-016)
+    setCustomRules([]);
+    setDuplicates([]);
+    setAudioFiles([]);
+    setPdfFiles([]);
+    setImageFiles([]);
+    setSelectedFile(null);
+    setPreviewItems(null);
+    setZipFolders([]);
+    setZipSelected([]);
+    setStats(null);
+    setHasHistory(false);
+    setMediaError('');
+
+    if (!path) return;
+
+    const loadWorkspace = async () => {
+      if (!window.pywebview?.api) return;
+      try {
+        // 1. Workspace Stats
+        const statsRes = await window.pywebview.api.analyze_workspace(path);
+        if (workspaceTokenRef.current === currentToken && statsRes?.success) {
+          setStats(statsRes.stats);
+        }
+
+        // 2. Custom Rules (strictly replace without leaking)
+        const rulesRes = await window.pywebview.api.load_rules(path);
+        if (workspaceTokenRef.current === currentToken) {
+          if (rulesRes?.success) {
+            setCustomRules(Array.isArray(rulesRes.rules) ? rulesRes.rules : []);
+          } else {
+            setCustomRules([]);
+          }
+        }
+
+        // 3. Undo History check
+        if (window.pywebview.api.check_history) {
+          const histRes = await window.pywebview.api.check_history(path);
+          if (workspaceTokenRef.current === currentToken && histRes?.success) {
+            setHasHistory(Boolean(histRes.has_history));
+          }
+        } else if (rulesRes?.has_history !== undefined && workspaceTokenRef.current === currentToken) {
+          setHasHistory(Boolean(rulesRes.has_history));
+        }
+
+        // 4. Media files
+        if (typeof window.pywebview.api.get_audio_files === 'function') {
+          const [resAudio, resPdf, resImage] = await Promise.all([
+            window.pywebview.api.get_audio_files(path).catch(() => ({ success: false })),
+            window.pywebview.api.get_pdf_files(path).catch(() => ({ success: false })),
+            window.pywebview.api.get_image_files(path).catch(() => ({ success: false })),
+          ]);
+          if (workspaceTokenRef.current === currentToken) {
+            if (resAudio?.success) setAudioFiles(resAudio.files || []);
+            if (resPdf?.success) setPdfFiles(resPdf.files || []);
+            if (resImage?.success) setImageFiles(resImage.files || []);
+            setMediaError('');
+          }
+        }
+
+        // 5. Zip folders
+        const zipRes = await window.pywebview.api.list_subfolders(path);
+        if (workspaceTokenRef.current === currentToken && zipRes?.success) {
+          setZipFolders(zipRes.folders || []);
+          setZipSelected([]);
+        }
+      } catch (err) {
+        if (workspaceTokenRef.current === currentToken) {
+          console.error('Failed to load workspace data:', err);
+        }
+      }
+    };
+
+    loadWorkspace();
   }, [path]);
 
   // ─────────────────────────────────────────────
@@ -169,15 +292,15 @@ const App = () => {
   const refreshStats = async () => {
     if (!path || !window.pywebview?.api) return;
     const res = await window.pywebview.api.analyze_workspace(path);
-    if (res.success) setStats(res.stats);
+    if (res?.success) setStats(res.stats);
   };
 
   const loadZipFolders = async () => {
     if (!path || !window.pywebview?.api) return;
     const res = await window.pywebview.api.list_subfolders(path);
-    if (res.success) {
-      setZipFolders(res.folders);
-      setZipSelected((prev) => prev.filter((n) => res.folders.some((f) => f.name === n)));
+    if (res?.success) {
+      setZipFolders(res.folders || []);
+      setZipSelected((prev) => prev.filter((n) => (res.folders || []).some((f) => f.name === n)));
     }
   };
 
@@ -187,10 +310,17 @@ const App = () => {
 
   const loadRules = async () => {
     if (!path || !window.pywebview?.api) return;
-    const res = await window.pywebview.api.load_rules(path);
-    if (res.success) {
-      if (res.rules?.length > 0) setCustomRules(res.rules);
-      setHasHistory(res.has_history);
+    try {
+      const res = await window.pywebview.api.load_rules(path);
+      if (res?.success) {
+        setCustomRules(Array.isArray(res.rules) ? res.rules : []);
+        if (res.has_history !== undefined) setHasHistory(Boolean(res.has_history));
+      } else {
+        setCustomRules([]);
+      }
+    } catch (err) {
+      console.error('Failed to load rules:', err);
+      setCustomRules([]);
     }
   };
 
@@ -316,136 +446,201 @@ const App = () => {
     }
   };
 
-  const handleMP3toWAV = async (filePath) => {
-    if (!window.pywebview?.api) return;
-    
+  const doSingleConvert = async (apiMethodName, filePath, removeOrig, quality) => {
+    if (isOperatingRef.current || !window.pywebview?.api) return;
+    isOperatingRef.current = true;
     setLoading(true);
     setProgress(0);
-    const res = await window.pywebview.api.convert_mp3_to_wav(filePath, removeOriginalMp3);
-    setLoading(false);
-    setProgress(0);
-    showStatus(res.success ? 'success' : 'error', res.success ? res.message : res.error);
-    if (res.success) {
-      refreshStats();
-      refreshMediaFiles();
+    try {
+      const fn = window.pywebview.api[apiMethodName];
+      if (!fn) throw new Error(`API method ${apiMethodName} not found.`);
+      const args = quality !== undefined ? [filePath, quality, removeOrig] : [filePath, removeOrig];
+      const res = await fn(...args);
+      showStatus(res.success ? 'success' : 'error', res.success ? res.message : res.error);
+      if (res.success) {
+        refreshStats();
+        refreshMediaFiles();
+        if (window.pywebview.api.check_history) {
+          const hist = await window.pywebview.api.check_history(path);
+          if (hist?.success) setHasHistory(Boolean(hist.has_history));
+        } else if (!removeOrig) {
+          setHasHistory(true);
+        }
+      }
+    } catch (err) {
+      showStatus('error', `Conversion failed: ${err.message}`);
+    } finally {
+      isOperatingRef.current = false;
+      setLoading(false);
+      setProgress(0);
     }
   };
 
-  const handleBatchMP3toWAV = async () => {
-    if (!path || !window.pywebview?.api) return;
-    setLoading(true);
-    setProgress(0);
-    const res = await window.pywebview.api.batch_convert_mp3_to_wav(path, removeOriginalMp3, isDryRun);
-    setLoading(false);
-    setProgress(0);
-    showStatus(res.success ? 'success' : 'error', res.success ? res.message : res.error);
-    refreshStats();
-    refreshMediaFiles();
-  };
-
-  const handleCompressPDF = async (filePath) => {
-    if (!window.pywebview?.api) return;
-    setLoading(true);
-    setProgress(0);
-    const res = await window.pywebview.api.compress_pdf(filePath, removeOriginalPdf);
-    setLoading(false);
-    setProgress(0);
-    showStatus(res.success ? 'success' : 'error', res.success ? res.message : res.error);
-    if (res.success) {
-      refreshStats();
-      refreshMediaFiles();
+  const handleMP3toWAV = (filePath) => {
+    if (!window.pywebview?.api || isOperatingRef.current) return;
+    if (removeOriginalMp3) {
+      const fileName = filePath.split(/[\\/]/).pop();
+      setConfirmDialog({
+        title: 'Confirm: Convert MP3 to WAV',
+        message: `This will convert "${fileName}" to WAV and move the original MP3 to the Recycle Bin.`,
+        onConfirm: () => {
+          setConfirmDialog(null);
+          doSingleConvert('convert_mp3_to_wav', filePath, true);
+        },
+      });
+      return;
     }
+    doSingleConvert('convert_mp3_to_wav', filePath, false);
   };
 
-  const handleBatchCompressPDF = async () => {
-    if (!path || !window.pywebview?.api) return;
-    setLoading(true);
-    setProgress(0);
-    const res = await window.pywebview.api.batch_compress_pdf(path, removeOriginalPdf, isDryRun);
-    setLoading(false);
-    setProgress(0);
-    showStatus(res.success ? 'success' : 'error', res.success ? res.message : res.error);
-    refreshStats();
-    refreshMediaFiles();
+  const handleBatchMP3toWAV = () => {
+    runOperation('batch_convert_mp3_to_wav', removeOriginalMp3);
   };
 
-  const handleOptimizeImage = async (filePath) => {
-    if (!window.pywebview?.api) return;
-    setLoading(true);
-    setProgress(0);
-    const res = await window.pywebview.api.optimize_image(filePath, imgQuality, removeOriginalImage);
-    setLoading(false);
-    setProgress(0);
-    showStatus(res.success ? 'success' : 'error', res.success ? res.message : res.error);
-    if (res.success) {
-      refreshStats();
-      refreshMediaFiles();
+  const handleCompressPDF = (filePath) => {
+    if (!window.pywebview?.api || isOperatingRef.current) return;
+    if (removeOriginalPdf) {
+      const fileName = filePath.split(/[\\/]/).pop();
+      setConfirmDialog({
+        title: 'Confirm: Compress PDF',
+        message: `This will compress "${fileName}" and move the original PDF to the Recycle Bin.`,
+        onConfirm: () => {
+          setConfirmDialog(null);
+          doSingleConvert('compress_pdf', filePath, true);
+        },
+      });
+      return;
     }
+    doSingleConvert('compress_pdf', filePath, false);
   };
 
-  const handleBatchOptimizeImages = async () => {
-    if (!path || !window.pywebview?.api) return;
-    setLoading(true);
-    setProgress(0);
-    const res = await window.pywebview.api.optimize_images(path, imgQuality, removeOriginalImage, isDryRun);
-    setLoading(false);
-    setProgress(0);
-    showStatus(res.success ? 'success' : 'error', res.success ? res.message : res.error);
-    refreshStats();
-    refreshMediaFiles();
+  const handleBatchCompressPDF = () => {
+    runOperation('batch_compress_pdf', removeOriginalPdf);
+  };
+
+  const handleOptimizeImage = (filePath) => {
+    if (!window.pywebview?.api || isOperatingRef.current) return;
+    if (removeOriginalImage) {
+      const fileName = filePath.split(/[\\/]/).pop();
+      setConfirmDialog({
+        title: 'Confirm: Optimize Image',
+        message: `This will optimize "${fileName}" and move the original image to the Recycle Bin.`,
+        onConfirm: () => {
+          setConfirmDialog(null);
+          doSingleConvert('optimize_image', filePath, true, imgQuality);
+        },
+      });
+      return;
+    }
+    doSingleConvert('optimize_image', filePath, false, imgQuality);
+  };
+
+  const handleBatchOptimizeImages = () => {
+    runOperation('batch_optimize_images', imgQuality, removeOriginalImage);
   };
 
   // ─────────────────────────────────────────────
-  // Generic operation runner
+  // Generic operation runner & typed adapters
   // ─────────────────────────────────────────────
 
-  // Operations that produce an undo-able history
-  const UNDOABLE_OPS = [
-    'sequential_rename', 'sort_by_date', 'flatten_workspace', 'smart_categorize',
-    'advanced_regex_rename', 'cleanup_old_files', 'archive_large_files', 'convert_image_formats',
-    'batch_zip_folders', 'change_extensions',
-  ];
+  const opTitleFor = (opName, mode) => {
+    if (opName === 'sequential_rename') {
+      return mode === 'folders' ? 'Sequential Rename (Folders)' : 'Sequential Rename (Files)';
+    }
+    return opName
+      .split('_')
+      .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+      .join(' ');
+  };
 
-  // Operations that permanently change/delete files on disk and are NOT
-  // gated by the system-critical-directory modal. Previously these fired
-  // immediately with no "are you sure?" step whenever Dry Run was off —
-  // the only safety net was remembering to toggle Dry Run first.
-  const DESTRUCTIVE_OPS = [
-    'delete_duplicates', 'cleanup_old_files', 'advanced_regex_rename',
-    'flatten_workspace', 'archive_large_files', 'change_extensions', 'batch_unzip',
-    'batch_zip_folders',
-  ];
-
-  const opTitleFor = (opName) => opName
-    .split('_')
-    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
-    .join(' ');
-
-  // Operations whose backend signature accepts a trailing `recursive` bool
-  const RECURSIVE_CAPABLE_OPS = [
-    'advanced_regex_rename', 'cleanup_old_files', 'archive_large_files',
-    'batch_unzip', 'change_extensions', 'convert_image_formats',
-  ];
+  const buildOperationArgs = (opName, args) => {
+    switch (opName) {
+      case 'sequential_rename': {
+        const mode = (args[1] === 'folders' || args.includes('folders')) ? 'folders' : 'files';
+        const targetPrefix = (args[0] && args[0] !== 'folders' && args[0] !== 'files') ? args[0] : prefix;
+        return [targetPrefix, mode, sortMode, isDryRun, filterText, useRegex];
+      }
+      case 'change_extensions': {
+        const srcExt = args[0] || oldExt;
+        const dstExt = args[1] || newExt;
+        return [srcExt, dstExt, isDryRun, filterText, recursiveMode];
+      }
+      case 'delete_duplicates': {
+        const targetDupes = args[0] || duplicates;
+        const targetKeepBy = args[1] || keepBy;
+        return [targetDupes, isDryRun, targetKeepBy];
+      }
+      case 'sort_by_date': {
+        const grain = args[0] || dateGrain;
+        return [grain, isDryRun];
+      }
+      case 'smart_categorize': {
+        const rules = args[0] && Array.isArray(args[0]) ? args[0] : customRules;
+        return [isDryRun, rules];
+      }
+      case 'advanced_regex_rename': {
+        const pat = args[0] !== undefined ? args[0] : regexPattern;
+        const rep = args[1] !== undefined ? args[1] : regexReplacement;
+        return [pat, rep, isDryRun, recursiveMode];
+      }
+      case 'cleanup_old_files': {
+        const days = args[0] !== undefined ? args[0] : automationDays;
+        return [days, isDryRun, recursiveMode];
+      }
+      case 'archive_large_files': {
+        const thresh = args[0] !== undefined ? args[0] : largeFileThresholdMb;
+        return [thresh, isDryRun, recursiveMode];
+      }
+      case 'batch_unzip': {
+        return [isDryRun, recursiveMode];
+      }
+      case 'batch_zip_folders': {
+        const sel = args[0] !== undefined ? args[0] : zipSelected;
+        const ext = args[1] !== undefined ? args[1] : zipTargetExt;
+        const delOrig = args[2] !== undefined ? args[2] : zipDeleteOriginals;
+        return [sel, ext, delOrig, isDryRun];
+      }
+      case 'additive_backup': {
+        const dest = args[0] !== undefined ? args[0] : backupDest;
+        return [dest, isDryRun];
+      }
+      case 'convert_image_formats': {
+        const srcExts = args[0] !== undefined ? args[0] : imgSourceExts;
+        const tgtExt = args[1] !== undefined ? args[1] : imgTargetExt;
+        return [srcExts, tgtExt, isDryRun, recursiveMode];
+      }
+      case 'batch_convert_mp3_to_wav': {
+        const removeOrig = args[0] !== undefined ? args[0] : removeOriginalMp3;
+        return [removeOrig, isDryRun];
+      }
+      case 'batch_compress_pdf': {
+        const removeOrig = args[0] !== undefined ? args[0] : removeOriginalPdf;
+        return [removeOrig, isDryRun];
+      }
+      case 'batch_optimize_images': {
+        const quality = args[0] !== undefined ? args[0] : imgQuality;
+        const removeOrig = args[1] !== undefined ? args[1] : removeOriginalImage;
+        return [quality, removeOrig, isDryRun];
+      }
+      case 'undo_last_operation': {
+        return [];
+      }
+      case 'delete_empty_folders': {
+        return [isDryRun];
+      }
+      default: {
+        return [...args, isDryRun];
+      }
+    }
+  };
 
   const executeOperation = async (opName, ...args) => {
-    let finalArgs = [...args];
-    if (opName === 'sequential_rename') {
-      finalArgs = [prefix, 'files', sortMode, isDryRun, filterText, useRegex];
-    } else if (opName === 'change_extensions') {
-      finalArgs = [oldExt, newExt, isDryRun, filterText, recursiveMode];
-    } else if (opName === 'delete_duplicates') {
-      finalArgs = [duplicates, isDryRun, keepBy];
-    } else if (opName === 'sort_by_date') {
-      finalArgs = [dateGrain, isDryRun];
-    } else if (opName === 'smart_categorize') {
-      finalArgs = [isDryRun, customRules];
-    } else if (RECURSIVE_CAPABLE_OPS.includes(opName)) {
-      finalArgs = [...args, isDryRun, recursiveMode];
-    } else {
-      finalArgs = [...args, isDryRun];
-    }
+    if (isOperatingRef.current) return;
+    isOperatingRef.current = true;
 
-    const opTitle = opTitleFor(opName);
+    const finalArgs = buildOperationArgs(opName, args);
+    const mode = opName === 'sequential_rename' ? ((args[1] === 'folders' || args.includes('folders')) ? 'folders' : 'files') : undefined;
+    const opTitle = opTitleFor(opName, mode);
 
     addLog(`${isDryRun ? '[SIMULATION] ' : ''}Starting ${opTitle}...`, 'info');
     setLoading(true);
@@ -453,12 +648,19 @@ const App = () => {
 
     try {
       if (window.pywebview && window.pywebview.api) {
-        const result = await window.pywebview.api[opName](path, ...finalArgs);
+        const apiFn = window.pywebview.api[opName] ||
+          (opName === 'batch_optimize_images' ? window.pywebview.api.optimize_images : null);
 
-        if (result.success) {
+        if (!apiFn) {
+          throw new Error(`API method ${opName} is not available.`);
+        }
+
+        const result = await apiFn(path, ...finalArgs);
+
+        if (result && result.success) {
           showStatus(isDryRun ? 'info' : 'success', result.message);
           if (result.errors && result.errors.length > 0) {
-            result.errors.forEach(err => addLog(err, 'error'));
+            result.errors.forEach((err) => addLog(err, 'error'));
           }
           if (result.history_warning) {
             addLog(`⚠ ${result.history_warning}`, 'error');
@@ -468,14 +670,28 @@ const App = () => {
           } else if (!isDryRun) {
             setPreviewItems(null);
           }
-          if (UNDOABLE_OPS.includes(opName) && !isDryRun) setHasHistory(true);
-          if (opName === 'undo_last_operation') setHasHistory(false);
+
+          // Undo history handling: check disk authoritatively
+          if (!isDryRun && window.pywebview.api.check_history) {
+            const histRes = await window.pywebview.api.check_history(path);
+            if (histRes?.success) {
+              setHasHistory(Boolean(histRes.has_history));
+            }
+          } else if (opName === 'undo_last_operation') {
+            setHasHistory(false);
+          } else if (opRegistry.undoable_ops.includes(opName) && !isDryRun && !result.history_warning) {
+            setHasHistory(true);
+          }
+
           if (opName === 'find_duplicates') setDuplicates(result.duplicates || []);
           if (opName === 'delete_duplicates') setDuplicates([]);
           refreshStats();
           if (opName === 'batch_zip_folders') loadZipFolders();
+          if (['batch_convert_mp3_to_wav', 'batch_compress_pdf', 'batch_optimize_images', 'undo_last_operation'].includes(opName)) {
+            refreshMediaFiles();
+          }
         } else {
-          showStatus('error', result.error);
+          showStatus('error', result?.error || 'Operation failed.');
         }
       } else {
         setTimeout(() => {
@@ -487,27 +703,73 @@ const App = () => {
     } catch (err) {
       showStatus('error', `Operation failed: ${err.message}`);
     } finally {
-      if (window.pywebview && window.pywebview.api) setLoading(false);
+      isOperatingRef.current = false;
+      setLoading(false);
       setProgress(0);
     }
   };
 
   const runOperation = async (opName, ...args) => {
+    if (loading || isOperatingRef.current) {
+      addLog('An operation is already in progress.', 'info');
+      return;
+    }
+    if (confirmDialog) return;
+
     if (!path) {
       showStatus('error', 'Please select a path first');
       return;
     }
 
-    if (DESTRUCTIVE_OPS.includes(opName) && !isDryRun) {
-      const opTitle = opTitleFor(opName);
+    const needsConfirm = !isDryRun && (
+      opRegistry.confirmation_required_ops.includes(opName) ||
+      opRegistry.destructive_ops.includes(opName)
+    );
+
+    if (needsConfirm) {
+      const mode = opName === 'sequential_rename' ? ((args[1] === 'folders' || args.includes('folders')) ? 'folders' : 'files') : undefined;
+      const opTitle = opTitleFor(opName, mode);
+      let message = 'This will modify files on disk now (Simulation is off).';
+
+      if (opName === 'delete_duplicates') {
+        message = 'Non-kept copies in each duplicate group will be sent to the Recycle Bin.';
+      } else if (opName === 'delete_empty_folders') {
+        message = 'All empty folders in this workspace will be deleted.';
+      } else if (opName === 'batch_zip_folders') {
+        const delOrig = args[2] !== undefined ? args[2] : zipDeleteOriginals;
+        message = delOrig
+          ? 'Selected folders will be zipped and originals moved to the Recycle Bin.'
+          : 'Selected folders will be compressed into individual archives.';
+      } else if (opName === 'batch_convert_mp3_to_wav') {
+        const delOrig = args[0] !== undefined ? args[0] : removeOriginalMp3;
+        message = delOrig
+          ? 'All MP3 files will be converted to WAV and originals moved to the Recycle Bin.'
+          : 'All MP3 files will be converted to WAV.';
+      } else if (opName === 'batch_compress_pdf') {
+        const delOrig = args[0] !== undefined ? args[0] : removeOriginalPdf;
+        message = delOrig
+          ? 'All PDF files will be compressed and originals moved to the Recycle Bin.'
+          : 'All PDF files will be compressed.';
+      } else if (opName === 'batch_optimize_images') {
+        const delOrig = args[1] !== undefined ? args[1] : removeOriginalImage;
+        message = delOrig
+          ? 'All images will be optimized and originals moved to the Recycle Bin.'
+          : 'All images will be compressed and optimized.';
+      } else if (opName === 'undo_last_operation') {
+        message = 'This will revert the filesystem changes from the previous operation. Any created files will be sent to the Recycle Bin.';
+      } else if (opRegistry.undoable_ops.includes(opName)) {
+        message = 'This will modify files on disk now (Simulation is off). This action can be reversed with the Undo button if it completes successfully.';
+      } else {
+        message = 'This will permanently modify files on disk (Simulation is off). This operation does NOT support undo.';
+      }
+
       setConfirmDialog({
         title: `Confirm: ${opTitle}`,
-        message: `This will modify or delete files on disk now (Dry Run is off). ${
-          opName === 'delete_duplicates'
-            ? `Non-kept copies in each group will be sent to the Recycle Bin.`
-            : `This action can only be reversed with the Undo button, and only if it completed successfully.`
-        }`,
-        onConfirm: () => { setConfirmDialog(null); executeOperation(opName, ...args); },
+        message,
+        onConfirm: () => {
+          setConfirmDialog(null);
+          executeOperation(opName, ...args);
+        },
       });
       return;
     }
@@ -793,10 +1055,10 @@ const App = () => {
                   <input type="text" value={prefix} onChange={(e) => setPrefix(e.target.value)} className="glass-input w-full" placeholder="Enter prefix (e.g. Photo_)" />
                 </div>
 
-                <div className="flex gap-4">
-                   <button onClick={() => runOperation('sequential_rename')} className="btn-primary flex-1 py-4">Rename Files</button>
-                   <button onClick={() => runOperation('sequential_rename', prefix, 'folders')} className="btn-ghost flex-1 py-4">Rename Folders</button>
-                </div>
+                 <div className="flex gap-4">
+                    <button disabled={loading} onClick={() => runOperation('sequential_rename', prefix, 'files')} className="btn-primary flex-1 py-4 disabled:opacity-50">Rename Files</button>
+                    <button disabled={loading} onClick={() => runOperation('sequential_rename', prefix, 'folders')} className="btn-ghost flex-1 py-4 disabled:opacity-50">Rename Folders</button>
+                 </div>
               </div>
             </div>
 
@@ -1159,6 +1421,36 @@ const App = () => {
                 <button onClick={handleSelectBackupDest} className="flex-1 py-2 bg-secondary border border-slate-300 text-ink rounded-lg text-[10px] font-bold hover:bg-slate-200 transition-colors">Select Dest</button>
                 <button onClick={() => runOperation('additive_backup', backupDest)} className="flex-[2] py-2 bg-filed text-on-filed rounded-lg text-[10px] font-bold hover:bg-filed-dark transition-colors">Run Backup</button>
               </div>
+            </div>
+
+            <div className="glass-card space-y-4">
+              <div className="flex items-center gap-2 text-emerald-400 font-bold">
+                <ImageIcon className="w-5 h-5" /> Image Format Converter
+              </div>
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  placeholder="Source exts (e.g. .png,.bmp)"
+                  value={imgSourceExts}
+                  onChange={(e) => setImgSourceExts(e.target.value)}
+                  className="glass-input flex-1 py-1.5 text-xs font-mono"
+                  aria-label="Source image extensions"
+                />
+                <input
+                  type="text"
+                  placeholder="Target (e.g. .webp)"
+                  value={imgTargetExt}
+                  onChange={(e) => setImgTargetExt(e.target.value)}
+                  className="glass-input w-24 py-1.5 text-xs font-mono"
+                  aria-label="Target image extension"
+                />
+              </div>
+              <button
+                onClick={() => runOperation('convert_image_formats', imgSourceExts, imgTargetExt)}
+                className="w-full py-2 bg-emerald-600 hover:bg-emerald-500 rounded-lg text-xs font-bold transition-all"
+              >
+                Convert Formats
+              </button>
             </div>
           </div>
         );

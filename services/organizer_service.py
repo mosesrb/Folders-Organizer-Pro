@@ -4,7 +4,8 @@ import re
 import datetime
 import json
 from pathlib import Path
-from .file_service import is_locked, safe_dest as _safe_dest
+from .file_service import is_locked, safe_dest as _safe_dest, DestinationAllocator
+from .path_guard import sanitize_folder_name, validate_destination, PathSecurityError
 
 def sequential_rename(path: str, prefix: str, mode: str, sort_mode: str, dry_run: bool, filter_str: str, use_regex: bool, progress_callback):
     p = Path(path)
@@ -126,19 +127,18 @@ def flatten_workspace(path: str, dry_run: bool, progress_callback):
     if not files_to_move:
         return [], 0
 
+    allocator = DestinationAllocator(p)
     if dry_run:
         preview = []
         for file in files_to_move:
-            dest = p / file.name
+            dest = allocator.allocate(file.name)
             preview.append({"action": "move", "src": str(file), "dst": str(dest)})
         return preview, len(files_to_move)
 
     total = len(files_to_move)
     new_history = []
     for idx, file in enumerate(files_to_move):
-        dest = p / file.name
-        if dest.exists():
-            dest = p / f"{file.stem}_{idx}{file.suffix}"
+        dest = allocator.allocate(file.name)
         shutil.move(str(file), str(dest))
         new_history.append({"action": "move", "src": str(file), "dst": str(dest)})
         progress_callback(int(((idx + 1) / total) * 100))
@@ -175,8 +175,10 @@ def smart_categorize(path: str, dry_run: bool, custom_rules: list, progress_call
     custom_keywords = {}
     if custom_rules:
         for rule in custom_rules:
-            folder = rule.get('folder', '').strip()
-            if not folder: continue
+            raw_folder = rule.get('folder', '').strip()
+            if not raw_folder:
+                continue
+            folder = sanitize_folder_name(raw_folder)
             rule_exts = [e.strip().lower() if e.strip().startswith('.') else f'.{e.strip().lower()}' for e in rule.get('extensions', []) if e.strip()]
             rule_keys = [k.strip().lower() for k in rule.get('keywords', []) if k.strip()]
             if rule_exts: custom_category_map[folder] = rule_exts
@@ -188,11 +190,6 @@ def smart_categorize(path: str, dry_run: bool, custom_rules: list, progress_call
     def _target_category(file):
         name_lower = file.name.lower()
         ext = file.suffix.lower()
-        # Custom rules represent explicit user intent, so they're checked
-        # first — a user's own keyword/extension rule always wins over a
-        # built-in default, even if they happen to overlap (e.g. a custom
-        # rule using 'invoice', which the built-in 'Work' category also
-        # uses).
         for cat, keys in custom_keywords.items():
             if any(k in name_lower for k in keys):
                 return cat
@@ -210,14 +207,16 @@ def smart_categorize(path: str, dry_run: bool, custom_rules: list, progress_call
     if dry_run:
         preview = []
         for file in files:
-            target_dir = p / _target_category(file)
+            target_cat = _target_category(file)
+            target_dir = validate_destination(p / target_cat / file.name, p).parent
             preview.append({"action": "move", "src": str(file), "dst": str(target_dir / file.name)})
         return preview, len(files)
 
     new_history = []
     for idx, file in enumerate(files):
         target_cat = _target_category(file)
-        target_dir = p / target_cat
+        dest_candidate = validate_destination(p / target_cat / file.name, p)
+        target_dir = dest_candidate.parent
         target_dir.mkdir(parents=True, exist_ok=True)
         dest = _safe_dest(target_dir, file.name)
         shutil.move(str(file), str(dest))
