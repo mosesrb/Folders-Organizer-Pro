@@ -1,0 +1,3 @@
+# This project stores its project directives docs in docs/ rather than .project/
+# This file tells the PCC sync hook where to find them.
+docs_dir: docs
