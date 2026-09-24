@@ -78,3 +78,8 @@ inno_setup_7.exe
 
 
 
+
+# Project Directives Clean Split (Private Vault)
+.project/
+docs/internal/
+
