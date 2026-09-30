@@ -29,6 +29,12 @@ if "%ISCC%"=="" (
 )
 
 if "%ISCC%"=="" (
+    if exist "%LOCALAPPDATA%\Programs\Antigravity IDE\resources\app\node_modules\innosetup\bin\ISCC.exe" (
+        set "ISCC=%LOCALAPPDATA%\Programs\Antigravity IDE\resources\app\node_modules\innosetup\bin\ISCC.exe"
+    )
+)
+
+if "%ISCC%"=="" (
     echo [!] Inno Setup Compiler (ISCC.exe) was not found on your system.
     echo.
     echo To build the Setup.exe installer:

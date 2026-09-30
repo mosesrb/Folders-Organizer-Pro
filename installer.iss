@@ -1,5 +1,5 @@
-﻿#define MyAppName "Folders Organizer Pro"
-#define MyAppVersion "5.0.4"
+#define MyAppName "Folders Organizer Pro"
+#define MyAppVersion "5.1.0"
 #define MyAppPublisher "Moses RB"
 #define MyAppURL "https://github.com/mosesrb/Folders-Organizer-Pro"
 #define MyAppExeName "FoldersOrganizerPro_Portable.exe"
