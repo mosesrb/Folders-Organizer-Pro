@@ -31,6 +31,15 @@ WizardStyle=modern
 PrivilegesRequired=lowest
 PrivilegesRequiredOverridesAllowed=dialog
 
+; Version Info Metadata
+VersionInfoVersion=5.1.0.0
+VersionInfoCompany={#MyAppPublisher}
+VersionInfoDescription=Folders Organizer Pro Setup
+VersionInfoTextVersion={#MyAppVersion}
+VersionInfoProductName={#MyAppName}
+VersionInfoProductVersion=5.1.0.0
+VersionInfoCopyright=Copyright (c) 2026 {#MyAppPublisher}
+
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
 

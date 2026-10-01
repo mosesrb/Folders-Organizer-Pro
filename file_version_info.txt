@@ -23,7 +23,7 @@ VSVersionInfo(
         StringStruct('OriginalFilename', 'FoldersOrganizerPro_Portable.exe'),
         StringStruct('ProductName', 'Folders Organizer Pro'),
         StringStruct('ProductVersion', '5.1.0.0'),
-        StringStruct('Comments', 'Commit 0e294c5')])
+        StringStruct('Comments', 'Commit 139094a')])
       ]), 
     VarFileInfo([VarStruct('Translation', [1033, 1200])])
   ]
