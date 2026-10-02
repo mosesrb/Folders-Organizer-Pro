@@ -654,9 +654,19 @@ class OrganizerAPI:
                 return {"success": False, "error": err or "Conversion failed."}
 
             if remove_original:
-                import send2trash
-                send2trash.send2trash(str(p_src))
-                return {"success": True, "message": f"Converted to: {os.path.basename(dst)} (Original moved to Recycle Bin)", "dst": dst}
+                recycle_ok = False
+                recycle_err = None
+                try:
+                    import send2trash
+                    send2trash.send2trash(str(p_src))
+                    recycle_ok = True
+                except Exception as te:
+                    recycle_err = str(te)
+
+                if recycle_ok:
+                    return {"success": True, "message": f"Converted to: {os.path.basename(dst)} (Original moved to Recycle Bin)", "dst": dst}
+                else:
+                    return {"success": True, "message": f"Converted to: {os.path.basename(dst)}, but failed to move original to Recycle Bin: {recycle_err}", "dst": dst, "warning": f"Recycle Bin error: {recycle_err}"}
 
             self._history = [{"action": "create", "src": str(p_src), "dst": dst}]
             self._save_history()
@@ -677,6 +687,8 @@ class OrganizerAPI:
             results = []
             new_history = []
             failures = []
+            recycled_count = 0
+            recycle_failures = []
 
             for idx, file in enumerate(files):
                 dst, err = media_service.convert_mp3_to_wav(str(file), self._update_progress)
@@ -686,8 +698,9 @@ class OrganizerAPI:
                         try:
                             import send2trash
                             send2trash.send2trash(str(file))
+                            recycled_count += 1
                         except Exception as te:
-                            failures.append(f"Failed to remove {file.name}: {te}")
+                            recycle_failures.append(f"Failed to recycle {file.name}: {te}")
                     else:
                         new_history.append({"action": "create", "src": str(file), "dst": dst})
                 else:
@@ -699,10 +712,16 @@ class OrganizerAPI:
                 self._save_history()
             msg = f"Successfully converted {len(results)} MP3 files to WAV."
             if remove_original:
-                msg += " (Originals moved to Recycle Bin)."
+                if len(results) > 0 and len(recycle_failures) == 0:
+                    msg += " (Originals moved to Recycle Bin)."
+                elif recycled_count > 0:
+                    msg += f" ({recycled_count} moved to Recycle Bin; {len(recycle_failures)} could not be recycled)."
+                else:
+                    msg += f" (Warning: {len(recycle_failures)} original(s) could not be moved to Recycle Bin)."
             if failures:
-                msg += f" {len(failures)} failed."
-            return {"success": True, "message": msg, "errors": failures}
+                msg += f" {len(failures)} conversion(s) failed."
+            all_errors = failures + recycle_failures
+            return {"success": True, "message": msg, "errors": all_errors}
         except Exception as e:
             return {"success": False, "error": str(e)}
 
@@ -716,9 +735,19 @@ class OrganizerAPI:
             dst, err = media_service.compress_pdf(str(p_src), self._update_progress)
             if dst:
                 if remove_original:
-                    import send2trash
-                    send2trash.send2trash(str(p_src))
-                    return {"success": True, "message": f"Compressed PDF created: {os.path.basename(dst)} (Original moved to Recycle Bin)", "dst": dst}
+                    recycle_ok = False
+                    recycle_err = None
+                    try:
+                        import send2trash
+                        send2trash.send2trash(str(p_src))
+                        recycle_ok = True
+                    except Exception as te:
+                        recycle_err = str(te)
+
+                    if recycle_ok:
+                        return {"success": True, "message": f"Compressed PDF created: {os.path.basename(dst)} (Original moved to Recycle Bin)", "dst": dst}
+                    else:
+                        return {"success": True, "message": f"Compressed PDF created: {os.path.basename(dst)}, but failed to move original to Recycle Bin: {recycle_err}", "dst": dst, "warning": f"Recycle Bin error: {recycle_err}"}
 
                 self._history = [{"action": "create", "src": str(p_src), "dst": dst}]
                 self._save_history()
@@ -740,6 +769,8 @@ class OrganizerAPI:
             results = []
             new_history = []
             failures = []
+            recycled_count = 0
+            recycle_failures = []
 
             for idx, file in enumerate(files):
                 dst, err = media_service.compress_pdf(str(file), self._update_progress)
@@ -749,8 +780,9 @@ class OrganizerAPI:
                         try:
                             import send2trash
                             send2trash.send2trash(str(file))
+                            recycled_count += 1
                         except Exception as te:
-                            failures.append(f"Failed to remove {file.name}: {te}")
+                            recycle_failures.append(f"Failed to recycle {file.name}: {te}")
                     else:
                         new_history.append({"action": "create", "src": str(file), "dst": dst})
                 else:
@@ -762,10 +794,16 @@ class OrganizerAPI:
                 self._save_history()
             msg = f"Successfully compressed {len(results)} PDF files."
             if remove_original:
-                msg += " (Originals moved to Recycle Bin)."
+                if len(results) > 0 and len(recycle_failures) == 0:
+                    msg += " (Originals moved to Recycle Bin)."
+                elif recycled_count > 0:
+                    msg += f" ({recycled_count} moved to Recycle Bin; {len(recycle_failures)} could not be recycled)."
+                else:
+                    msg += f" (Warning: {len(recycle_failures)} original(s) could not be moved to Recycle Bin)."
             if failures:
-                msg += f" {len(failures)} failed."
-            return {"success": True, "message": msg, "errors": failures}
+                msg += f" {len(failures)} compression(s) failed."
+            all_errors = failures + recycle_failures
+            return {"success": True, "message": msg, "errors": all_errors}
         except Exception as e:
             return {"success": False, "error": str(e)}
 
@@ -779,9 +817,19 @@ class OrganizerAPI:
             dst, err = media_service.optimize_image(str(p_src), quality, self._update_progress)
             if dst:
                 if remove_original:
-                    import send2trash
-                    send2trash.send2trash(str(p_src))
-                    return {"success": True, "message": f"Optimized image created: {os.path.basename(dst)} (Original moved to Recycle Bin)", "dst": dst}
+                    recycle_ok = False
+                    recycle_err = None
+                    try:
+                        import send2trash
+                        send2trash.send2trash(str(p_src))
+                        recycle_ok = True
+                    except Exception as te:
+                        recycle_err = str(te)
+
+                    if recycle_ok:
+                        return {"success": True, "message": f"Optimized image created: {os.path.basename(dst)} (Original moved to Recycle Bin)", "dst": dst}
+                    else:
+                        return {"success": True, "message": f"Optimized image created: {os.path.basename(dst)}, but failed to move original to Recycle Bin: {recycle_err}", "dst": dst, "warning": f"Recycle Bin error: {recycle_err}"}
 
                 self._history = [{"action": "create", "src": str(p_src), "dst": dst}]
                 self._save_history()
@@ -804,6 +852,8 @@ class OrganizerAPI:
             results = []
             new_history = []
             failures = []
+            recycled_count = 0
+            recycle_failures = []
             for idx, file in enumerate(files):
                 dst, err = media_service.optimize_image(str(file), quality, self._update_progress)
                 if dst:
@@ -812,8 +862,9 @@ class OrganizerAPI:
                         try:
                             import send2trash
                             send2trash.send2trash(str(file))
+                            recycled_count += 1
                         except Exception as te:
-                            failures.append(f"Failed to remove {file.name}: {te}")
+                            recycle_failures.append(f"Failed to recycle {file.name}: {te}")
                     else:
                         new_history.append({"action": "create", "src": str(file), "dst": dst})
                 else:
@@ -825,10 +876,16 @@ class OrganizerAPI:
                 self._save_history()
             msg = f"Successfully optimized {len(results)} images."
             if remove_original:
-                msg += " (Originals moved to Recycle Bin)."
+                if len(results) > 0 and len(recycle_failures) == 0:
+                    msg += " (Originals moved to Recycle Bin)."
+                elif recycled_count > 0:
+                    msg += f" ({recycled_count} moved to Recycle Bin; {len(recycle_failures)} could not be recycled)."
+                else:
+                    msg += f" (Warning: {len(recycle_failures)} original(s) could not be moved to Recycle Bin)."
             if failures:
                 msg += f" {len(failures)} failed."
-            return {"success": True, "message": msg, "items": results, "errors": failures}
+            all_errors = failures + recycle_failures
+            return {"success": True, "message": msg, "items": results, "errors": all_errors}
         except Exception as e:
             return {"success": False, "error": str(e)}
 

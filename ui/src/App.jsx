@@ -92,12 +92,80 @@ const DEFAULT_OPERATION_REGISTRY = {
   ],
 };
 
+// Custom hook to manage focus trap, escape key, and focus restoration for accessible dialogs (FOP-AUD-018)
+const useModalA11y = (isOpen, onClose, modalRef, initialFocusRef) => {
+  const previousActiveElement = useRef(null);
+
+  useEffect(() => {
+    if (!isOpen) return;
+
+    previousActiveElement.current = document.activeElement;
+
+    const timer = setTimeout(() => {
+      if (initialFocusRef && initialFocusRef.current) {
+        initialFocusRef.current.focus();
+      } else if (modalRef.current) {
+        const focusable = modalRef.current.querySelectorAll(
+          'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+        );
+        if (focusable.length > 0) {
+          focusable[0].focus();
+        } else {
+          modalRef.current.focus();
+        }
+      }
+    }, 50);
+
+    const handleKeyDown = (e) => {
+      if (e.key === 'Escape') {
+        e.stopPropagation();
+        if (onClose) onClose();
+      } else if (e.key === 'Tab') {
+        if (!modalRef.current) return;
+        const focusable = Array.from(modalRef.current.querySelectorAll(
+          'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+        )).filter(el => !el.hasAttribute('disabled') && el.getAttribute('aria-hidden') !== 'true');
+
+        if (focusable.length === 0) return;
+
+        const firstElement = focusable[0];
+        const lastElement = focusable[focusable.length - 1];
+
+        if (e.shiftKey) {
+          if (document.activeElement === firstElement || !modalRef.current.contains(document.activeElement)) {
+            e.preventDefault();
+            lastElement.focus();
+          }
+        } else {
+          if (document.activeElement === lastElement || !modalRef.current.contains(document.activeElement)) {
+            e.preventDefault();
+            firstElement.focus();
+          }
+        }
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => {
+      clearTimeout(timer);
+      window.removeEventListener('keydown', handleKeyDown);
+      if (previousActiveElement.current && typeof previousActiveElement.current.focus === 'function') {
+        previousActiveElement.current.focus();
+      }
+    };
+  }, [isOpen, onClose, modalRef, initialFocusRef]);
+};
+
 const App = () => {
   // — Core state —
   const [path, setPath] = useState('');
   const [opRegistry, setOpRegistry] = useState(DEFAULT_OPERATION_REGISTRY);
   const workspaceTokenRef = useRef(0);
   const isOperatingRef = useRef(false);
+  const systemWarningRef = useRef(null);
+  const previewDialogRef = useRef(null);
+  const confirmDialogRef = useRef(null);
+  const termsModalRef = useRef(null);
   const [prefix, setPrefix] = useState('Item_');
   const [oldExt, setOldExt] = useState('.zip');
   const [newExt, setNewExt] = useState('.cbr');
@@ -172,6 +240,14 @@ const App = () => {
     setHasAcceptedTerms(true);
     setShowTermsModal(false);
   };
+
+  // — Dialog Accessibility Hooks (FOP-AUD-018) —
+  useModalA11y(showSystemWarning, () => { setShowSystemWarning(false); setPendingSystemPath(''); }, systemWarningRef);
+  useModalA11y(Boolean(previewItems), () => setPreviewItems(null), previewDialogRef);
+  useModalA11y(Boolean(confirmDialog), () => setConfirmDialog(null), confirmDialogRef);
+  useModalA11y(showTermsModal, () => { if (hasAcceptedTerms) setShowTermsModal(false); }, termsModalRef);
+
+  const isAnyModalOpen = Boolean(showSystemWarning || previewItems || confirmDialog || showTermsModal);
 
   // — Progress listener —
   useEffect(() => {
@@ -940,6 +1016,7 @@ const App = () => {
                       <button 
                         key={grain}
                         onClick={() => setDateGrain(grain)}
+                        aria-pressed={dateGrain === grain}
                         className={`py-3 rounded-xl border text-xs font-bold uppercase transition-all ${dateGrain === grain ? 'bg-orange-500/20 border-orange-500/50 text-orange-600' : 'bg-secondary/40 border-slate-300 text-slate-600 hover:bg-secondary'}`}
                       >
                         {grain}
@@ -1049,10 +1126,10 @@ const App = () => {
                 
                 <div className="space-y-2">
                   <div className="flex justify-between items-center px-1">
-                    <label className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Naming Pattern</label>
+                    <label htmlFor="renamer-prefix-input" className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Naming Pattern</label>
                     <button onClick={() => setUseRegex(!useRegex)} className={`px-2 py-0.5 text-[9px] font-bold rounded border ${useRegex ? 'bg-indigo-500/20 border-indigo-500/40 text-indigo-700' : 'bg-secondary/50 border-slate-300 text-slate-600'}`}>REGEX MODE</button>
                   </div>
-                  <input type="text" value={prefix} onChange={(e) => setPrefix(e.target.value)} className="glass-input w-full" placeholder="Enter prefix (e.g. Photo_)" />
+                  <input id="renamer-prefix-input" aria-label="Naming pattern prefix" type="text" value={prefix} onChange={(e) => setPrefix(e.target.value)} className="glass-input w-full" placeholder="Enter prefix (e.g. Photo_)" />
                 </div>
 
                  <div className="flex gap-4">
@@ -1066,7 +1143,8 @@ const App = () => {
                <h3 className="text-sm font-bold text-slate-500 uppercase tracking-widest mb-4">Live Filter</h3>
                <div className="flex items-center gap-3 glass-input">
                   <ListFilter className="w-4 h-4 text-slate-500" />
-                  <input type="text" value={filterText} onChange={(e) => setFilterText(e.target.value)} className="bg-transparent border-none outline-none text-sm w-full" placeholder="Limit operation to files matching..." />
+                  <label htmlFor="renamer-filter-input" className="sr-only">Live Filter</label>
+                  <input id="renamer-filter-input" aria-label="Limit operation to files matching" type="text" value={filterText} onChange={(e) => setFilterText(e.target.value)} className="bg-transparent border-none outline-none text-sm w-full" placeholder="Limit operation to files matching..." />
                </div>
             </div>
           </div>
@@ -1082,18 +1160,19 @@ const App = () => {
               <div className="space-y-8">
                 <div className="flex items-center gap-6">
                   <div className="flex-1 space-y-2">
-                    <label className="text-[10px] font-bold text-slate-500 uppercase tracking-widest block px-1">Source Extension</label>
-                    <input type="text" value={oldExt} onChange={(e) => setOldExt(e.target.value)} className="glass-input w-full py-4 text-lg font-mono text-cyan-400 text-center" placeholder=".jpg" />
+                    <label htmlFor="source-extension-input" className="text-[10px] font-bold text-slate-500 uppercase tracking-widest block px-1">Source Extension</label>
+                    <input id="source-extension-input" aria-label="Source extension" type="text" value={oldExt} onChange={(e) => setOldExt(e.target.value)} className="glass-input w-full py-4 text-lg font-mono text-cyan-400 text-center" placeholder=".jpg" />
                   </div>
                   <div className="pt-6"><MoveRight className="w-6 h-6 text-slate-700" /></div>
                   <div className="flex-1 space-y-2">
-                    <label className="text-[10px] font-bold text-slate-500 uppercase tracking-widest block px-1">Target Extension</label>
-                    <input type="text" value={newExt} onChange={(e) => setNewExt(e.target.value)} className="glass-input w-full py-4 text-lg font-mono text-primary text-center" placeholder=".webp" />
+                    <label htmlFor="target-extension-input" className="text-[10px] font-bold text-slate-500 uppercase tracking-widest block px-1">Target Extension</label>
+                    <input id="target-extension-input" aria-label="Target extension" type="text" value={newExt} onChange={(e) => setNewExt(e.target.value)} className="glass-input w-full py-4 text-lg font-mono text-primary text-center" placeholder=".webp" />
                   </div>
                 </div>
                 <button onClick={() => runOperation('change_extensions')} className="w-full btn-primary !bg-cyan-700 hover:!bg-cyan-600 py-4 text-lg font-bold">Apply Mass Extension Change</button>
-                <label className="flex items-center justify-center gap-2 text-xs text-cyan-700 cursor-pointer">
+                <label htmlFor="extensions-recursive-toggle" className="flex items-center justify-center gap-2 text-xs text-cyan-700 cursor-pointer">
                   <input
+                    id="extensions-recursive-toggle"
                     type="checkbox"
                     checked={recursiveMode}
                     onChange={(e) => setRecursiveMode(e.target.checked)}
@@ -1132,12 +1211,14 @@ const App = () => {
                   <button onClick={refreshMediaFiles} className="btn-ghost py-2 px-4 flex items-center justify-center gap-2 text-xs shrink-0 border border-slate-700">
                     <RotateCcw className="w-4 h-4" /> Refresh
                   </button>
-                  <label className="flex items-center gap-2 text-xs text-pink-700 cursor-pointer">
+                  <label htmlFor="media-remove-original-mp3" className="flex items-center gap-2 text-xs text-pink-700 cursor-pointer">
                     <input 
+                      id="media-remove-original-mp3"
                       type="checkbox" 
                       checked={removeOriginalMp3} 
                       onChange={(e) => setRemoveOriginalMp3(e.target.checked)}
                       className="accent-pink-500"
+                      aria-label="Remove original .mp3 after conversion"
                     />
                     Remove original .mp3
                   </label>
@@ -1195,12 +1276,14 @@ const App = () => {
                   <button onClick={refreshMediaFiles} className="btn-ghost py-2 px-4 flex items-center justify-center gap-2 text-xs shrink-0 border border-slate-700">
                     <RotateCcw className="w-4 h-4" /> Refresh
                   </button>
-                  <label className="flex items-center gap-2 text-xs text-red-600 cursor-pointer">
+                  <label htmlFor="media-remove-original-pdf" className="flex items-center gap-2 text-xs text-red-600 cursor-pointer">
                     <input 
+                      id="media-remove-original-pdf"
                       type="checkbox" 
                       checked={removeOriginalPdf} 
                       onChange={(e) => setRemoveOriginalPdf(e.target.checked)}
                       className="accent-red-500"
+                      aria-label="Remove original .pdf after compression"
                     />
                     Remove original .pdf
                   </label>
@@ -1250,18 +1333,20 @@ const App = () => {
                 </div>
                 <div className="flex items-center gap-4">
                   <div className="flex flex-col items-end gap-1 mr-4">
-                    <span className="text-[10px] font-bold text-slate-500 uppercase">Quality: {imgQuality}%</span>
-                    <input type="range" min="10" max="100" value={imgQuality} onChange={(e) => setImgQuality(Number(e.target.value))} aria-label={`Image quality: ${imgQuality}%`} className="w-24 accent-emerald-500" />
+                    <label htmlFor="image-quality-slider" className="text-[10px] font-bold text-slate-500 uppercase">Quality: {imgQuality}%</label>
+                    <input id="image-quality-slider" type="range" min="10" max="100" value={imgQuality} onChange={(e) => setImgQuality(Number(e.target.value))} aria-label={`Image quality: ${imgQuality}%`} className="w-24 accent-emerald-500" />
                   </div>
                   <button onClick={refreshMediaFiles} className="btn-ghost py-2 px-4 flex items-center justify-center gap-2 text-xs shrink-0 border border-slate-700">
                     <RotateCcw className="w-4 h-4" /> Refresh
                   </button>
-                  <label className="flex items-center gap-2 text-xs text-emerald-700 cursor-pointer">
+                  <label htmlFor="media-remove-original-image" className="flex items-center gap-2 text-xs text-emerald-700 cursor-pointer">
                     <input 
+                      id="media-remove-original-image"
                       type="checkbox" 
                       checked={removeOriginalImage} 
                       onChange={(e) => setRemoveOriginalImage(e.target.checked)}
                       className="accent-emerald-500"
+                      aria-label="Remove original image after optimization"
                     />
                     Remove original
                   </label>
@@ -1307,8 +1392,9 @@ const App = () => {
               <h2 className="text-2xl font-bold flex items-center gap-3 text-violet-400">
                 <Layers className="w-8 h-8" /> Advanced Tools
               </h2>
-              <label className="flex items-center gap-2 text-xs text-violet-700 cursor-pointer bg-violet-500/10 border border-violet-500/20 rounded-xl px-4 py-2">
+              <label htmlFor="advanced-recursive-toggle" className="flex items-center gap-2 text-xs text-violet-700 cursor-pointer bg-violet-500/10 border border-violet-500/20 rounded-xl px-4 py-2">
                 <input
+                  id="advanced-recursive-toggle"
                   type="checkbox"
                   checked={recursiveMode}
                   onChange={(e) => setRecursiveMode(e.target.checked)}
@@ -1348,11 +1434,11 @@ const App = () => {
 
               <div className="flex flex-wrap items-end gap-4">
                 <div className="flex flex-col gap-1">
-                  <span className="text-[10px] uppercase tracking-widest text-slate-500 font-bold">Archive extension</span>
-                  <input type="text" value={zipTargetExt} onChange={(e) => setZipTargetExt(e.target.value)} placeholder=".zip" className="glass-input w-28 py-1.5 text-xs font-mono" />
+                  <label htmlFor="zip-target-ext-input" className="text-[10px] uppercase tracking-widest text-slate-500 font-bold">Archive extension</label>
+                  <input id="zip-target-ext-input" aria-label="Archive extension" type="text" value={zipTargetExt} onChange={(e) => setZipTargetExt(e.target.value)} placeholder=".zip" className="glass-input w-28 py-1.5 text-xs font-mono" />
                 </div>
-                <label className="flex items-center gap-2 text-xs text-ink-soft cursor-pointer bg-secondary/40 border border-slate-300 rounded-xl px-3 py-2">
-                  <input type="checkbox" checked={zipDeleteOriginals} onChange={(e) => setZipDeleteOriginals(e.target.checked)} className="accent-accent" />
+                <label htmlFor="zip-delete-originals-toggle" className="flex items-center gap-2 text-xs text-ink-soft cursor-pointer bg-secondary/40 border border-slate-300 rounded-xl px-3 py-2">
+                  <input id="zip-delete-originals-toggle" aria-label="Send originals to Recycle Bin after zipping" type="checkbox" checked={zipDeleteOriginals} onChange={(e) => setZipDeleteOriginals(e.target.checked)} className="accent-accent" />
                   Send originals to Recycle Bin after zipping
                 </label>
                 <button
@@ -1370,8 +1456,10 @@ const App = () => {
                 <Wand2 className="w-5 h-5" /> Regex Renamer
               </div>
               <div className="space-y-2">
-                <input type="text" placeholder="Find pattern (regex)" value={regexPattern} onChange={e => setRegexPattern(e.target.value)} className="glass-input w-full text-xs font-mono"/>
-                <input type="text" placeholder="Replacement" value={regexReplacement} onChange={e => setRegexReplacement(e.target.value)} className="glass-input w-full text-xs font-mono"/>
+                <label htmlFor="advanced-regex-pattern" className="sr-only">Find pattern (regex)</label>
+                <input id="advanced-regex-pattern" aria-label="Find regex pattern" type="text" placeholder="Find pattern (regex)" value={regexPattern} onChange={e => setRegexPattern(e.target.value)} className="glass-input w-full text-xs font-mono"/>
+                <label htmlFor="advanced-regex-replacement" className="sr-only">Replacement</label>
+                <input id="advanced-regex-replacement" aria-label="Regex replacement" type="text" placeholder="Replacement" value={regexReplacement} onChange={e => setRegexReplacement(e.target.value)} className="glass-input w-full text-xs font-mono"/>
               </div>
               <button onClick={() => runOperation('advanced_regex_rename', regexPattern, regexReplacement)} className="w-full py-2 bg-violet-600 hover:bg-violet-500 rounded-lg text-xs font-bold transition-all">Apply Regex</button>
             </div>
@@ -1381,8 +1469,8 @@ const App = () => {
                 <Archive className="w-5 h-5" /> Old File Cleanup
               </div>
               <div className="flex items-center gap-3">
-                <span className="text-xs text-slate-500">Older than</span>
-                <input type="number" value={automationDays} onChange={e => setAutomationDays(Number(e.target.value))} className="glass-input w-24 py-1.5 text-xs text-orange-400 font-bold" />
+                <label htmlFor="automation-days-input" className="text-xs text-slate-500">Older than</label>
+                <input id="automation-days-input" aria-label="Older than days threshold" type="number" value={automationDays} onChange={e => setAutomationDays(Number(e.target.value))} className="glass-input w-24 py-1.5 text-xs text-orange-400 font-bold" />
                 <span className="text-xs text-slate-500">days</span>
               </div>
               <button onClick={() => runOperation('cleanup_old_files', automationDays)} className="w-full py-2 bg-orange-600 hover:bg-orange-500 rounded-lg text-xs font-bold transition-all">Archive Old Files</button>
@@ -1401,8 +1489,8 @@ const App = () => {
                 <Archive className="w-5 h-5" /> Large File Archiver
               </div>
               <div className="flex items-center gap-3">
-                <span className="text-xs text-slate-500">Larger than</span>
-                <input type="number" value={largeFileThresholdMb} onChange={e => setLargeFileThresholdMb(Number(e.target.value))} className="glass-input w-24 py-1.5 text-xs text-amber-400 font-bold" />
+                <label htmlFor="large-file-threshold-input" className="text-xs text-slate-500">Larger than</label>
+                <input id="large-file-threshold-input" aria-label="Larger than megabytes threshold" type="number" value={largeFileThresholdMb} onChange={e => setLargeFileThresholdMb(Number(e.target.value))} className="glass-input w-24 py-1.5 text-xs text-amber-400 font-bold" />
                 <span className="text-xs text-slate-500">MB</span>
               </div>
               <button onClick={() => runOperation('archive_large_files', largeFileThresholdMb)} className="w-full py-2 bg-amber-600 hover:bg-amber-500 rounded-lg text-xs font-bold transition-all">Move to LargeFiles/</button>
@@ -1428,7 +1516,9 @@ const App = () => {
                 <ImageIcon className="w-5 h-5" /> Image Format Converter
               </div>
               <div className="flex gap-2">
+                <label htmlFor="batch-convert-source-exts" className="sr-only">Source image extensions</label>
                 <input
+                  id="batch-convert-source-exts"
                   type="text"
                   placeholder="Source exts (e.g. .png,.bmp)"
                   value={imgSourceExts}
@@ -1436,7 +1526,9 @@ const App = () => {
                   className="glass-input flex-1 py-1.5 text-xs font-mono"
                   aria-label="Source image extensions"
                 />
+                <label htmlFor="batch-convert-target-ext" className="sr-only">Target image extension</label>
                 <input
+                  id="batch-convert-target-ext"
                   type="text"
                   placeholder="Target (e.g. .webp)"
                   value={imgTargetExt}
@@ -1470,9 +1562,18 @@ const App = () => {
 
                <div className="space-y-4">
                  <div className="grid grid-cols-3 gap-3">
-                    <input type="text" placeholder="Folder Name" value={newRuleFolder} onChange={e => setNewRuleFolder(e.target.value)} className="glass-input text-xs" />
-                    <input type="text" placeholder="Extensions (csv)" value={newRuleExts} onChange={e => setNewRuleExts(e.target.value)} className="glass-input text-xs" />
-                    <input type="text" placeholder="Keywords (csv)" value={newRuleKeywords} onChange={e => setNewRuleKeywords(e.target.value)} className="glass-input text-xs" />
+                    <div>
+                      <label htmlFor="new-rule-folder-input" className="sr-only">Folder Name</label>
+                      <input id="new-rule-folder-input" aria-label="New rule target folder name" type="text" placeholder="Folder Name" value={newRuleFolder} onChange={e => setNewRuleFolder(e.target.value)} className="glass-input text-xs w-full" />
+                    </div>
+                    <div>
+                      <label htmlFor="new-rule-exts-input" className="sr-only">Extensions (csv)</label>
+                      <input id="new-rule-exts-input" aria-label="New rule extensions list" type="text" placeholder="Extensions (csv)" value={newRuleExts} onChange={e => setNewRuleExts(e.target.value)} className="glass-input text-xs w-full" />
+                    </div>
+                    <div>
+                      <label htmlFor="new-rule-keywords-input" className="sr-only">Keywords (csv)</label>
+                      <input id="new-rule-keywords-input" aria-label="New rule keywords list" type="text" placeholder="Keywords (csv)" value={newRuleKeywords} onChange={e => setNewRuleKeywords(e.target.value)} className="glass-input text-xs w-full" />
+                    </div>
                  </div>
                  <button onClick={handleAddRule} className="w-full py-3 border border-indigo-500/30 bg-indigo-500/5 text-indigo-400 rounded-xl text-xs font-bold uppercase tracking-widest hover:bg-indigo-500/10 transition-all">Add New Rule</button>
                </div>
@@ -1545,9 +1646,13 @@ const App = () => {
 
   return (
     <div className="flex h-screen w-full bg-background text-ink overflow-hidden font-sans">
-      
-      {/* ── Sidebar Navigation ── */}
-      <aside className="w-64 border-r border-slate-300 bg-secondary/50 flex flex-col shrink-0">
+      <div 
+        className="flex h-full w-full overflow-hidden" 
+        aria-hidden={isAnyModalOpen ? "true" : undefined} 
+        inert={isAnyModalOpen ? "" : undefined}
+      >
+        {/* ── Sidebar Navigation ── */}
+        <aside className="w-64 border-r border-slate-300 bg-secondary/50 flex flex-col shrink-0">
         <div className="p-8">
            <h1 className="text-2xl font-bold font-serif text-ink flex items-center gap-3">
              <div className="w-8 h-8 bg-primary rounded-md flex items-center justify-center overflow-hidden shrink-0">
@@ -1751,10 +1856,11 @@ const App = () => {
            </div>
         </div>
       )}
+      </div>
 
       {/* ── Modals & Overlays ── */}
       {showSystemWarning && (
-        <div role="alertdialog" aria-modal="true" aria-labelledby="system-warning-title" className="fixed inset-0 bg-ink/70 backdrop-blur-sm flex items-center justify-center z-[200] p-10">
+        <div ref={systemWarningRef} tabIndex={-1} role="alertdialog" aria-modal="true" aria-labelledby="system-warning-title" className="fixed inset-0 bg-ink/70 backdrop-blur-sm flex items-center justify-center z-[200] p-10 outline-none">
           <div className="w-[500px] bg-card border border-accent/40 rounded-2xl p-12 shadow-[3px_5px_0_rgba(31,27,22,0.14)] flex flex-col gap-8 text-center">
             <div className="mx-auto w-20 h-20 rounded-full bg-accent/10 border border-accent/30 flex items-center justify-center">
               <ShieldAlert className="w-10 h-10 text-accent" aria-hidden="true" />
@@ -1778,7 +1884,7 @@ const App = () => {
       )}
 
       {previewItems && (
-        <div role="dialog" aria-modal="true" aria-labelledby="preview-dialog-title" className="fixed inset-0 bg-ink/70 backdrop-blur-sm flex items-center justify-center z-[190] p-10">
+        <div ref={previewDialogRef} tabIndex={-1} role="dialog" aria-modal="true" aria-labelledby="preview-dialog-title" className="fixed inset-0 bg-ink/70 backdrop-blur-sm flex items-center justify-center z-[190] p-10 outline-none">
           <div className="w-[640px] max-h-[80vh] bg-card border border-slate-300 rounded-2xl p-8 shadow-[3px_5px_0_rgba(31,27,22,0.1)] flex flex-col gap-4">
             <div className="flex items-center justify-between">
               <h2 id="preview-dialog-title" className="text-lg font-black text-ink flex items-center gap-2 font-serif">
@@ -1803,7 +1909,7 @@ const App = () => {
       )}
 
       {confirmDialog && (
-        <div role="alertdialog" aria-modal="true" aria-labelledby="confirm-dialog-title" className="fixed inset-0 bg-ink/70 backdrop-blur-sm flex items-center justify-center z-[200] p-10">
+        <div ref={confirmDialogRef} tabIndex={-1} role="alertdialog" aria-modal="true" aria-labelledby="confirm-dialog-title" className="fixed inset-0 bg-ink/70 backdrop-blur-sm flex items-center justify-center z-[200] p-10 outline-none">
           <div className="w-[480px] bg-card border border-amber-500/40 rounded-2xl p-10 shadow-[3px_5px_0_rgba(31,27,22,0.14)] flex flex-col gap-6 text-center">
             <div className="mx-auto w-16 h-16 rounded-full bg-amber-500/10 border border-amber-500/30 flex items-center justify-center">
               <ShieldAlert className="w-8 h-8 text-amber-600" aria-hidden="true" />
@@ -1822,7 +1928,7 @@ const App = () => {
 
       {/* ── Privacy Policy & Terms Modal (First-Run & On-Demand) ── */}
       {showTermsModal && (
-        <div role="dialog" aria-modal="true" aria-labelledby="terms-dialog-title" className="fixed inset-0 bg-ink/75 backdrop-blur-sm flex items-center justify-center z-[250] p-4 md:p-8">
+        <div ref={termsModalRef} tabIndex={-1} role="dialog" aria-modal="true" aria-labelledby="terms-dialog-title" className="fixed inset-0 bg-ink/75 backdrop-blur-sm flex items-center justify-center z-[250] p-4 md:p-8 outline-none">
           <div className="w-full max-w-2xl max-h-[85vh] bg-card border border-slate-300 rounded-2xl p-6 md:p-8 shadow-[3px_5px_0_rgba(31,27,22,0.15)] flex flex-col gap-5">
             {/* Header */}
             <div className="flex items-start justify-between gap-4 border-b border-slate-200 pb-4">
